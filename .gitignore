@@ -1,0 +1,69 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyd
+*.pdb
+*.egg-info/
+dist-info/
+.eggs/
+
+# PyInstaller
+dist/
+build/
+*.spec
+
+# virtual environments
+venv/
+.venv/
+env/
+.env/
+
+# Log files
+*.log
+
+# Test / debug files
+test_*.py
+test_*.json
+debug_test*.ps1
+debug_test2*.ps1
+decrypt_*.py
+decrypt_*.ps1
+decrypt_test*.ps1
+decrypt_test2*.ps1
+find_cipher.js
+get_tracks.js
+test_reorder*.js
+test_reorder*.ps1
+test_reorder3*.ps1
+test_pt.ps1
+test_rc.py
+test_wd.py
+test_env.py
+test_minimal.py
+test_pyi_env.py
+test_pyi_npm.py
+test_run_ncm.py
+test_subprocess_args.py
+test_subprocess_npm.py
+test_track_loading.py
+test_shell_npm.py
+test_exact_flow.py
+test_main_flow.py
+test_track_update.py
+test_song_post.py
+test_app_flow.py
+test_decrypt.py
+list_user_playlists.py
+test_old_api.py
+test_reorder.py
+fix_*.py
+check_*.py
+
+# API doc
+*API协议实现细节*.md
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini

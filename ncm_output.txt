@@ -1,0 +1,6 @@
+{
+  "success": true,
+  "qrCodeUrl": "https://163cn.tv/5XSHJZi",
+  "clickableUrl": "https://163cn.tv/5XSHJZi",
+  "message": "后台轮询已启动，请点击链接登录"
+}
