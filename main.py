@@ -10,12 +10,13 @@ import re
 import urllib.request
 import urllib.parse
 import datetime as _dt
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QHBoxLayout,
                              QVBoxLayout, QListWidget, QTableWidget, QTableWidgetItem,
                              QPushButton, QComboBox, QLabel, QMessageBox, QHeaderView,
                              QAbstractItemView, QGroupBox, QCheckBox, QLineEdit,
-                             QTextBrowser, QDialog, QVBoxLayout as QVBL2)
+                             QTextBrowser, QDialog, QVBoxLayout as QVBL2, QProgressBar)
 from PyQt6.QtCore import Qt, QTimer, QUrl
 from PyQt6.QtGui import QGuiApplication, QClipboard, QDesktopServices
 import openpyxl
@@ -32,6 +33,9 @@ def _log(msg):
         pass
 
 _log("APP START")
+
+# ===== 全局锁（用于序列化 ncm-cli album get 调用，避免并发 token 冲突）=====
+_album_lock = threading.Lock()
 
 # ===== 路径（兼容 PyInstaller 打包）=====
 APP_DIR = getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(__file__)))
@@ -137,7 +141,7 @@ def ncm_login():
     return None
 
 
-def ncm_get_tracks(playlist_enc_id):
+def ncm_get_tracks(playlist_enc_id, progress_callback=None):
     """获取歌单 tracks（分页获取最多1000首）：返回 (enc_ids列表, tracks_info列表)"""
     _log(f"[ncm_get_tracks] playlistId={playlist_enc_id}")
     all_tracks = []
@@ -170,6 +174,57 @@ def ncm_get_tracks(playlist_enc_id):
         except:
             _log(f"[ncm_get_tracks] JSON parse error at offset={offset}")
             break
+
+    # 补充 publishTime：用 album get 命令查每张专辑的发行时间
+    # 每个 track 里有 album.id（加密专辑ID），用 ncm-cli album get 获取 publishTime
+    album_ids_seen = {}
+    for t in all_tracks:
+        al = t.get("album") or t.get("al")
+        if isinstance(al, dict):
+            al_enc = al.get("id") or al.get("originalId")
+            if al_enc:
+                album_ids_seen[al_enc] = None  # 值先留空，后面填充
+
+    if album_ids_seen:
+        _log(f"[ncm_get_tracks] fetching publishTime for {len(album_ids_seen)} unique albums via album get")
+        # 并发查询专辑发行时间（3 个 worker），兼顾速度和稳定性
+        def _fetch_album(al_enc):
+            rc_al, out_al, _ = run_ncm_global([
+                "album", "get", "--albumId", str(al_enc), "--output", "json"
+            ])
+            pt = 0
+            if rc_al == 0:
+                text_al = out_al.strip()
+                b_al = text_al.find("{")
+                if b_al >= 0:
+                    try:
+                        parsed_al = json.loads(text_al[b_al:])
+                        pt = parsed_al.get("data", {}).get("publishTime") or 0
+                    except:
+                        pass
+            return al_enc, pt
+
+        fetched_count = 0
+        with ThreadPoolExecutor(max_workers=3) as executor:
+            futures = {executor.submit(_fetch_album, al_enc): al_enc for al_enc in album_ids_seen}
+            for future in as_completed(futures):
+                al_enc, pt = future.result()
+                album_ids_seen[al_enc] = pt
+                fetched_count += 1
+                if progress_callback:
+                    progress_callback(fetched_count, len(album_ids_seen))
+        _log(f"[ncm_get_tracks] album publishTime results: {dict((k, v) for k, v in album_ids_seen.items())}")
+
+    # 把 publishTime 注入每条 track
+    for t in all_tracks:
+        al = t.get("album") or t.get("al")
+        pt = 0
+        if isinstance(al, dict):
+            al_enc = al.get("id") or al.get("originalId")
+            if al_enc and al_enc in album_ids_seen:
+                pt = album_ids_seen[al_enc] or 0
+        t["publishTime"] = pt
+
     enc_ids = [t["id"] for t in all_tracks]
     return enc_ids, all_tracks
 
@@ -400,7 +455,7 @@ class MainWindow(QMainWindow):
         self.sort_asc_cbs = []  # per-level asc/desc comboboxes
         for i, label in enumerate(["第1层:", "第2层:", "第3层:"]):
             cb = QComboBox()
-            cb.addItems(["", "艺人", "专辑", "歌曲名", "入库时间", "自定义顺序"])
+            cb.addItems(["", "艺人", "专辑", "歌曲名", "入库时间", "专辑发行时间", "自定义顺序"])
             cb.setMinimumWidth(110)
             asc_cb = QComboBox()
             asc_cb.addItems(["升序", "降序"])
@@ -456,8 +511,8 @@ class MainWindow(QMainWindow):
 
         # 表格
         self.table = QTableWidget()
-        self.table.setColumnCount(6)
-        self.table.setHorizontalHeaderLabels(["#", "歌曲名", "艺人", "专辑", "ID", "入库时间"])
+        self.table.setColumnCount(7)
+        self.table.setHorizontalHeaderLabels(["#", "歌曲名", "艺人", "专辑", "ID", "入库时间", "发行时间"])
         self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.table.setAlternatingRowColors(True)
@@ -467,6 +522,14 @@ class MainWindow(QMainWindow):
         self.status_lbl = QLabel("就绪")
         self.status_lbl.setStyleSheet("color:#888; font-size:12px;")
         right.addWidget(self.status_lbl)
+
+        # 专辑信息加载进度条（放在 status_lbl 下方）
+        self.album_progress = QProgressBar()
+        self.album_progress.setFixedHeight(8)
+        self.album_progress.setTextVisible(False)
+        self.album_progress.setStyleSheet("QProgressBar { border: none; background: #e0e0e0; border-radius: 4px; } QProgressBar::chunk { background: #1db100; border-radius: 4px; }")
+        self.album_progress.setVisible(False)
+        right.addWidget(self.album_progress)
 
         layout.addLayout(right)
 
@@ -506,12 +569,32 @@ class MainWindow(QMainWindow):
         self.current_pl_raw_id = p.get("originalId", "")
         self._sorted_tracks = None
         self.apply_btn.setEnabled(False)
+        self.album_progress.setVisible(True)
+        self.album_progress.setMaximum(0)
+        self.album_progress.setValue(0)
         self.status_lbl.setText("加载歌曲...")
         threading.Thread(target=self._bg_load_tracks, daemon=True).start()
 
     def _bg_load_tracks(self):
         _log(f"[_bg_load_tracks] start, playlistId={self.current_pl_enc_id}")
-        enc_ids, tracks_data = ncm_get_tracks(self.current_pl_enc_id)
+        total_albums = 0
+        fetched_albums = [0]  # 用列表包装以便在内层函数修改
+
+        def _on_album_progress(cur, total):
+            total_albums = total
+            fetched_albums[0] = cur
+            def _do():
+                self.album_progress.setVisible(True)
+                self.album_progress.setMaximum(total)
+                self.album_progress.setValue(cur)
+                self.status_lbl.setText(f"加载歌曲 {cur}/{total}")
+            QTimer.singleShot(0, _do)
+
+        enc_ids, tracks_data = ncm_get_tracks(self.current_pl_enc_id, _on_album_progress)
+        def _done():
+            self.album_progress.setVisible(False)
+            self.status_lbl.setText("就绪")
+        QTimer.singleShot(0, _done)
         _log(f"[_bg_load_tracks] got enc_ids: {enc_ids is not None}, count={len(enc_ids) if enc_ids else 0}")
         self.server_track_ids = enc_ids or []
 
@@ -534,6 +617,7 @@ class MainWindow(QMainWindow):
                 "album": t.get("album") or {},
                 "addTime": t.get("_addTime", 0),
                 "originalId": orig_id,
+                "publishTime": t.get("publishTime", 0),
             }
             if orig_id:
                 numeric_to_enc[str(orig_id)] = enc_id
@@ -557,9 +641,10 @@ class MainWindow(QMainWindow):
                     "ar": info.get("artists", []),
                     "al": info.get("album", {}),
                     "_addTime": info.get("addTime", 0),
+                    "publishTime": info.get("publishTime", 0),
                 }
             else:
-                tr = {"id": orig_id, "encId": enc, "name": "（无信息）", "ar": [], "al": {}, "_addTime": 0}
+                tr = {"id": orig_id, "encId": enc, "name": "（无信息）", "ar": [], "al": {}, "_addTime": 0, "publishTime": 0}
             ordered_tracks.append(tr)
         _log(f"[_bg_load_tracks] first ordered_track keys={list(ordered_tracks[0].keys()) if ordered_tracks else 'empty'}")
         self._sorted_tracks = None
@@ -589,6 +674,12 @@ class MainWindow(QMainWindow):
                     self.table.setItem(i, 5, QTableWidgetItem(dt.strftime("%Y-%m-%d %H:%M")))
                 else:
                     self.table.setItem(i, 5, QTableWidgetItem("-"))
+                pt = tr.get("publishTime", 0)
+                if pt and pt > 0:
+                    pub_dt = datetime.datetime.fromtimestamp(pt / 1000)
+                    self.table.setItem(i, 6, QTableWidgetItem(pub_dt.strftime("%Y-%m-%d")))
+                else:
+                    self.table.setItem(i, 6, QTableWidgetItem("-"))
             self.table.resizeRowsToContents()
             self.export_btn.setEnabled(shown > 0)
             if total > shown:
@@ -750,6 +841,12 @@ class MainWindow(QMainWindow):
                     self.table.setItem(i, 5, QTableWidgetItem(dt.strftime("%Y-%m-%d %H:%M")))
                 else:
                     self.table.setItem(i, 5, QTableWidgetItem("-"))
+                pt = tr.get("publishTime", 0)
+                if pt and pt > 0:
+                    pub_dt = datetime.datetime.fromtimestamp(pt / 1000)
+                    self.table.setItem(i, 6, QTableWidgetItem(pub_dt.strftime("%Y-%m-%d")))
+                else:
+                    self.table.setItem(i, 6, QTableWidgetItem("-"))
             self.table.resizeRowsToContents()
             self.status_lbl.setText(f"共 {len(tracks)} 首（预览模式）")
         except Exception as e:

@@ -1,0 +1,55 @@
+def _bg_load_tracks(self):
+        _log(f"[_bg_load_tracks] start, playlistId={self.current_pl_enc_id}")
+        enc_ids, tracks_data = ncm_get_tracks(self.current_pl_enc_id)
+        _log(f"[_bg_load_tracks] got enc_ids: {enc_ids is not None}, count={len(enc_ids) if enc_ids else 0}")
+        self.server_track_ids = enc_ids or []
+
+        # 直接从 tracks_data 构建映射，不发第二次 API
+        self.enc_to_info = {}
+        self.id_to_enc = {}
+        numeric_to_enc = {}
+        enc_to_numeric = {}
+        for t in tracks_data:
+            enc_id = t.get("id", "")
+            orig_id = t.get("originalId", "")
+            # 原地改造：给 raw track 数据加上展示层需要的字段
+            t["encId"] = enc_id
+            t["_addTime"] = (t.get("extMap") or {}).get("addTime", 0)
+            t["ar"] = t.get("artists") or []
+            t["al"] = t.get("album") or {}
+            self.enc_to_info[enc_id] = {
+                "name": t.get("name", ""),
+                "artists": t.get("artists", []) or [],
+                "album": t.get("album") or {},
+                "addTime": t.get("_addTime", 0),
+                "originalId": orig_id,
+            }
+            if orig_id:
+                numeric_to_enc[str(orig_id)] = enc_id
+                enc_to_numeric[enc_id] = str(orig_id)
+        self.id_to_enc = numeric_to_enc
+        # current_tracks 和 ordered_tracks 指向同一个原地改造后的 list
+        self.current_tracks = tracks_data
+
+        _log(f"[_bg_load_tracks] built info for {len(self.enc_to_info)} tracks")
+        _log(f"[_bg_load_tracks] first track keys={list(tracks_data[0].keys()) if tracks_data else 'empty'}")
+        # 构建 ordered_tracks（按服务器当前顺序）
+        ordered_tracks = []
+        for enc in (enc_ids or []):
+            info = self.enc_to_info.get(enc, {})
+            orig_id = enc_to_numeric.get(enc, "")
+            if info:
+                tr = {
+                    "id": orig_id,
+                    "encId": enc,
+                    "name": info.get("name", ""),
+                    "ar": info.get("artists", []),
+                    "al": info.get("album", {}),
+                    "_addTime": info.get("addTime", 0),
+                }
+            else:
+                tr = {"id": orig_id, "encId": enc, "name": "（无信息）", "ar": [], "al": {}, "_addTime": 0}
+            ordered_tracks.append(tr)
+        _log(f"[_bg_load_tracks] first ordered_track keys={list(ordered_tracks[0].keys()) if ordered_tracks else 'empty'}")
+        self._sorted_tracks = None
+        _log(f"[_bg_load_tracks] calling _show_tracks dir

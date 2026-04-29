@@ -1,0 +1,38 @@
+def load_playlists(self):
+        self.status_lbl.setText("加载歌单...")
+        self.playlist_list.clear()
+        threading.Thread(target=self._bg_load_pl, daemon=True).start()
+
+    def _bg_load_pl(self):
+        # 先检查登录状态
+        login_status = ncm_login_check()
+        if not login_status.get("success"):
+            QTimer.singleShot(0, lambda: self.status_lbl.setText("⚠ 未登录，请先扫码登录"))
+            return
+        self.playlists = ncm_get_playlists()
+        if not self.playlists:
+            # ncm_get_playlists 失败，可能是全局 ncm-cli 未安装
+            QTimer.singleShot(0, lambda: self.status_lbl.setText(
+                "⚠ 获取歌单失败。请确保已安装全局 ncm-cli：\nnpm install -g @music163/ncm-cli"))
+            return
+        QTimer.singleShot(0, self._show_pl)
+
+    def _show_pl(self):
+        for p in self.playlists:
+            name = p.get("name", "?")
+            count = p.get("trackCount", 0) or 0
+            self.playlist_list.addItem(f"{name}  ({count}首)")
+        self.status_lbl.setText(f"共 {len(self.playlists)} 个歌单")
+        if self.playlists:
+            self.playlist_list.setCurrentRow(0)
+
+    def _on_select(self, row):
+        if row < 0 or row >= len(self.playlists):
+            return
+        p = self.playlists[row]
+        self.current_pl_enc_id = p.get("id", "")
+        self.current_pl_raw_id = p.get("originalId", "")
+        self._sorted_tracks = None
+        self.apply_btn.setEnabled(False)
+        self.status_lbl.setText("加载歌曲...")
+        threading.Thread(target=self._bg_load_track

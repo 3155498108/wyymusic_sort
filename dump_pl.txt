@@ -1,0 +1,11 @@
+current_pl_enc_id = None   # 当前歌单加密ID
+        self.current_pl_raw_id = None    # 当前歌单原始数字ID
+        self.server_track_ids = []     # 服务器当前顺序的加密ID列表
+        self.id_to_enc = {}           # 数字ID -> 加密ID
+        self.enc_to_info = {}         # 加密ID -> {name, artists, album, addTime}
+        self.current_tracks = []      # 当前有元数据的 tracks
+        self._sorted_tracks = None    # 预览排序后的结果
+        self._custom_order = None
+        self._setup_ui()
+        self._check_login()
+        QTimer.singleShot(30

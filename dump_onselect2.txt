@@ -1,0 +1,14 @@
+def _on_select(self, row):
+        if row < 0 or row >= len(self.playlists):
+            return
+        p = self.playlists[row]
+        self.current_pl_enc_id = p.get("id", "")
+        self.current_pl_raw_id = p.get("originalId", "")
+        self._sorted_tracks = None
+        self.apply_btn.setEnabled(False)
+        self.status_lbl.setText("加载歌曲...")
+        threading.Thread(target=self._bg_load_tracks, daemon=True).start()
+
+    def _bg_load_tracks(self):
+        _log(f"[_bg_load_tracks] start, playlistId={self.current_pl_enc_id}")
+        enc_ids, tracks_data = ncm_get_tracks(self.current_pl_
