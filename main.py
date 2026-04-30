@@ -109,6 +109,8 @@ def run_ncm_global(args, timeout=120):
 
 def ncm_login_check():
     rc, out, _ = run_ncm(["login", "--check", "--output", "json"])
+    if not (rc == 0 and out.strip()):
+        rc, out, _ = run_ncm_global(["login", "--check", "--output", "json"])
     if rc == 0 and out.strip():
         text = out.strip()
         brace = text.find("{")
@@ -128,7 +130,10 @@ def ncm_logout():
 
 
 def ncm_login():
+    # 先试 run_ncm，失败的话换 run_ncm_global
     rc, out, err = run_ncm(["login", "--output", "json"], timeout=8)
+    if not (rc == 0 and out.strip()):
+        rc, out, err = run_ncm_global(["login", "--output", "json"])
     if rc == 0 and out.strip():
         text = out.strip()
         brace = text.find("{")
