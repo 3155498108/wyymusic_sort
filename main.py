@@ -11,7 +11,6 @@ from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QHBoxLayout,
                              QTextBrowser, QDialog, QVBoxLayout as QVBL2, QProgressBar)
 from PyQt6.QtCore import Qt, QTimer, QUrl
 from PyQt6.QtGui import QGuiApplication, QClipboard, QDesktopServices
-import openpyxl
 
 from logger import _log
 from constants import album_lock, APP_DIR, BASE_DIR, NODE, NCM_CLI
@@ -20,6 +19,7 @@ from core.ncm_client import (
     ncm_login, ncm_get_tracks, ncm_reorder, ncm_get_playlists,
 )
 from utils.sort import sort_multi_level, sort_by_custom_order
+from utils.excel import export_table_to_excel, import_tracks_from_excel
 
 import time as _time
 
@@ -586,11 +586,6 @@ class MainWindow(QMainWindow):
         rows = self.table.rowCount()
         if rows == 0:
             return
-        names = []
-        for r in range(rows):
-            item = self.table.item(r, 1)
-            if item:
-                names.append(item.text())
         from PyQt6.QtWidgets import QFileDialog, QMessageBox
         default_name = "playlist.xlsx"
         if self.playlist_list.currentItem():
@@ -599,21 +594,10 @@ class MainWindow(QMainWindow):
         if not path:
             return
         try:
-            wb = openpyxl.Workbook()
-            ws = wb.active
-            ws.title = "歌曲排序"
-            ws.append(["序号", "歌曲名", "艺人", "专辑", "加密ID", "入库时间"])
-            for r in range(rows):
-                row_data = []
-                for c in range(6):
-                    item = self.table.item(r, c)
-                    row_data.append(item.text() if item else "")
-                ws.append(row_data)
-            wb.save(path)
+            rows = export_table_to_excel(self.table, default_name, path)
             self.status_lbl.setText(f"已导出 {rows} 首")
             QMessageBox.information(self, "完成", f"已导出 {rows} 首歌曲到：\n{path}")
         except Exception as e:
-            QMessageBox.warning(self, "错误", f"导出失赫:\n{e}")
             QMessageBox.warning(self, "错误", f"导出失败:\n{e}")
 
 
@@ -628,24 +612,7 @@ class MainWindow(QMainWindow):
         if not path:
             return
         try:
-            wb = openpyxl.load_workbook(path)
-            ws = wb.active
-            rows_data = list(ws.iter_rows(min_row=2, values_only=True))  # skip header
-            if not rows_data:
-                QMessageBox.information(self, "提示", "表格中没有数据")
-                return
-            encid_to_tr = {tr.get("encId"): tr for tr in self.current_tracks if tr.get("encId")}
-            ordered = []
-            missing = 0
-            for row in rows_data:
-                seq, name, artist, album, enc_id, add_time = (row[i] if i < len(row) else None for i in range(6))
-                if not enc_id:
-                    continue
-                tr = encid_to_tr.get(enc_id)
-                if tr:
-                    ordered.append(tr)
-                else:
-                    missing += 1
+            ordered, missing = import_tracks_from_excel(path, self.current_tracks)
             if not ordered:
                 QMessageBox.warning(self, "错误", "未能匹配到任何歌曲（歌单可能有变化）")
                 return
