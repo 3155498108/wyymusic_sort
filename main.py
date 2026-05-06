@@ -3,7 +3,6 @@
 """
 import sys
 import datetime as _dt
-import re
 
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QHBoxLayout,
                              QVBoxLayout, QListWidget, QTableWidget, QTableWidgetItem,
@@ -20,6 +19,7 @@ from core.ncm_client import (
     run_ncm, run_ncm_global, ncm_login_check, ncm_logout,
     ncm_login, ncm_get_tracks, ncm_reorder, ncm_get_playlists,
 )
+from utils.sort import sort_multi_level, sort_by_custom_order
 
 import time as _time
 
@@ -463,33 +463,7 @@ class MainWindow(QMainWindow):
         self.status_lbl.setText("已清除自定义顺序")
 
     def _sort_by_custom_order(self, tracks):
-        if not self._custom_order:
-            return tracks
-        name_to_tr = {}
-        for tr in tracks:
-            name = tr.get("name", "").strip()
-            if name:
-                name_to_tr[name] = tr
-        ordered = []
-        unmatched = []
-        for name in self._custom_order:
-            matched = None
-            if name in name_to_tr:
-                matched = name_to_tr.pop(name)
-            else:
-                clean = re.sub(r"[（(].*?[）)]", "", name).strip()
-                for k, v in list(name_to_tr.items()):
-                    k_clean = re.sub(r"[（(].*?[）)]", "", k).strip()
-                    if k_clean == clean:
-                        matched = name_to_tr.pop(k)
-                        break
-            if matched:
-                ordered.append(matched)
-            else:
-                unmatched.append(name)
-        for tr in tracks:
-            if tr not in ordered:
-                ordered.append(tr)
+        ordered, unmatched = sort_by_custom_order(tracks, self._custom_order)
         if unmatched:
             self.status_lbl.setText(f"自定义顺序：{len(ordered)} 首已排，{len(unmatched)} 首未匹配")
         else:
@@ -512,56 +486,11 @@ class MainWindow(QMainWindow):
         # Special case: 艺人 primary + 入库时间 secondary
         # Group by primary artist, sort artist groups by group's extreme addTime,
         # within each group sort by addTime
-        is_artist_primary = len(levels) >= 1 and levels[0][0] == "艺人"
-        is_addtime_secondary = len(levels) >= 2 and levels[1][0] == "入库时间"
-
-        if len(levels) == 2 and is_artist_primary and is_addtime_secondary:
-            from collections import defaultdict
-            # 入库时间第2层的升/降控制艺人组的排序方向
-            group_dir = levels[1][1]  # 0=升序(最早入库艺人先)=min, 1=降序(最新入库艺人先)=max
-            # 艺人第1层的升/降控制艺人组内歌曲的排序方向
-            within_dir = levels[0][1]
-
-            groups = defaultdict(list)
-            for tr in self.current_tracks:
-                ar = tr.get("fullArtists") or tr.get("artists") or tr.get("ar") or []
-                primary = ar[0].get("name", "") if ar else ""
-                groups[primary].append(tr)
-
-            groups_list = [(p, list(s)) for p, s in groups.items()]
-
-            # Within each group sort by addTime (controlled by 艺人层的升/降)
-            for p, s in groups_list:
-                s.sort(key=lambda tr: tr.get("_addTime", 0), reverse=within_dir)
-
-            # Sort artist groups by group's extreme addTime (controlled by 入库时间层的升/降)
-            if group_dir:  # 降序 -> newest artist group first (max addTime)
-                groups_list.sort(key=lambda g: max(tr.get("_addTime", 0) for tr in g[1]), reverse=True)
-            else:  # 升序 -> oldest artist group first (min addTime)
-                groups_list.sort(key=lambda g: min(tr.get("_addTime", 0) for tr in g[1]), reverse=False)
-
-            ordered = []
-            for p, s in groups_list:
-                ordered.extend(s)
-
-        else:
-            # Standard multi-level stable sort
-            ordered = list(self.current_tracks)
-            for field, reverse in levels:
-                if field == "自定义顺序":
-                    ordered = self._sort_by_custom_order(ordered)
-                elif field == "艺人":
-                    def _key(tr): return "/".join(a.get("name", "") for a in (tr.get("ar") or []) if a.get("name"))
-                    ordered.sort(key=_key, reverse=reverse)
-                elif field == "专辑":
-                    def _key(tr): return (tr.get("al") or {}).get("name", "") if isinstance(tr.get("al"), dict) else ""
-                    ordered.sort(key=_key, reverse=reverse)
-                elif field == "歌曲名":
-                    def _key(tr): return tr.get("name", "")
-                    ordered.sort(key=_key, reverse=reverse)
-                elif field == "入库时间":
-                    def _key(tr): return tr.get("_addTime", 0)
-                    ordered.sort(key=_key, reverse=reverse)
+        ordered = sort_multi_level(
+            self.current_tracks,
+            levels,
+            custom_order=self._custom_order if any(lvl[0] == "自定义顺序" for lvl in levels) else None,
+        )
 
         self._sorted_tracks = ordered
         self._show_sorted_tracks(ordered)
