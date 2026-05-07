@@ -8,10 +8,17 @@ __pycache__/
 dist-info/
 .eggs/
 
-# PyInstaller
+# PyInstaller specs
+!NetEaseSorter.spec
+*.spec
+
+# Build output
 dist/
 build/
-*.spec
+test_dist/
+
+# ncm-cli (external dependency, has its own repo)
+ncm-cli/
 
 # virtual environments
 venv/
@@ -25,8 +32,8 @@ env/
 # Test / debug files
 test_*.py
 test_*.json
+test_*.spec
 debug_test*.ps1
-debug_test2*.ps1
 decrypt_*.py
 decrypt_*.ps1
 decrypt_test*.ps1
@@ -46,8 +53,8 @@ test_pyi_npm.py
 test_run_ncm.py
 test_subprocess_args.py
 test_subprocess_npm.py
-test_track_loading.py
 test_shell_npm.py
+test_track_loading.py
 test_exact_flow.py
 test_main_flow.py
 test_track_update.py
@@ -60,6 +67,28 @@ test_reorder.py
 fix_*.py
 check_*.py
 
+# Debug/dump files
+dump_*.py
+dump_*.txt
+debug_fail.py
+debug_fail.spec
+
+# Fetch/utility scripts
+batch_fetch.py
+check_export.py
+check_preview.py
+fetch_*.py
+find_*.py
+fill_gap.py
+
+# Test data files
+bangdream_*.json
+step4.json
+test_tracks.json
+
+# Build scripts
+build_package.ps1
+
 # API doc
 *API协议实现细节*.md
 
@@ -67,3 +96,5 @@ check_*.py
 .DS_Store
 Thumbs.db
 desktop.ini
+/纯API歌单排序实现方案.md
+/改造ncm-cli歌单排序思路.md
