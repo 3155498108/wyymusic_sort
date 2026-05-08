@@ -38,7 +38,7 @@ def run_ncm(args: list[str], timeout: int = 60) -> tuple[int, str, str]:
     return r.returncode, r.stdout.decode("utf-8", errors="replace"), r.stderr.decode("utf-8", errors="replace")
 
 
-def run_ncm_global(args: list[str], timeout: int = 120) -> tuple[int, str, str]:
+def run_ncm_global(args: list[str], timeout: int = 300) -> tuple[int, str, str]:
     """用系统 npm exec --global 调用全局 ncm-cli（playlist 等命令）"""
     npm = _find_npm()
     if not npm or not os.path.exists(npm):
@@ -175,25 +175,25 @@ def ncm_get_tracks(playlist_enc_id: str, progress_callback=None, load_publish_ti
 def ncm_reorder(playlist_enc_id: str, track_ids_ordered: list[str]) -> dict | None:
     """调用 ncm-cli playlist reorder"""
     track_ids_str = ",".join(track_ids_ordered)
-    rc, out, _ = run_ncm_global([
-        "playlist", "reorder",
-        "--playlistId", playlist_enc_id,
-        "--trackIds", track_ids_str,
-        "--output", "json"
-    ])
+    _log(f"[ncm_reorder] calling with {len(track_ids_ordered)} tracks, playlistId={playlist_enc_id}")
     rc, out, err = run_ncm_global([
         "playlist", "reorder",
         "--playlistId", playlist_enc_id,
         "--trackIds", track_ids_str,
         "--output", "json"
     ])
+    _log(f"[ncm_reorder] rc={rc}, out_len={len(out)}, err_len={len(err)}")
     if rc != 0:
-        # 即使失败也尝试解析错误信息
         err_result = _parse_json_output(out) or {}
         err_result["_raw_err"] = err[:500] if err else ""
         err_result["code"] = -1
+        _log(f"[ncm_reorder] failed: {err_result}")
         return err_result
     result = _parse_json_output(out)
+    if result is None:
+        _log(f"[ncm_reorder] rc=0 but JSON parse failed. out={out[:200]}")
+    else:
+        _log(f"[ncm_reorder] success, code={result.get('code')}")
     return result
 
 

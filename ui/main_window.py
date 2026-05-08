@@ -397,6 +397,7 @@ class MainWindow(QMainWindow):
                     self.table.setItem(i, 6, QTableWidgetItem("-"))
             self.table.resizeRowsToContents()
             self.export_btn.setEnabled(shown > 0)
+            self.reload_btn.setEnabled(True)
             pl_total = getattr(self, '_pl_total_tracks', 0) or 0
             if pl_total > shown:
                 self.status_lbl.setText(f"已加载 {shown}/{pl_total} 首（歌单较大，部分歌曲暂无法排序）")
