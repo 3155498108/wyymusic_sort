@@ -105,6 +105,17 @@ class MainWindow(QMainWindow):
         refresh_btn.clicked.connect(self.load_playlists)
         left.addWidget(refresh_btn)
 
+        self.reload_btn = QPushButton("🔄 重新加载")
+        self.reload_btn.setStyleSheet("color:#555; padding:4px 10px;")
+        self.reload_btn.clicked.connect(self._on_reload)
+        self.reload_btn.setEnabled(False)
+        left.addWidget(self.reload_btn)
+
+        self.load_time_cb = QCheckBox("加载发行时间")
+        self.load_time_cb.setChecked(True)
+        self.load_time_cb.setStyleSheet("color:#666; font-size:12px;")
+        left.addWidget(self.load_time_cb)
+
         self.import_btn = QPushButton("导入Excel")
         self.import_btn.clicked.connect(self.import_playlist)
         self.import_btn.setStyleSheet("background:#555; color:white; padding:5px 14px;")
@@ -255,6 +266,19 @@ class MainWindow(QMainWindow):
         self.album_progress.setMaximum(0)
         self.album_progress.setValue(0)
         self.status_lbl.setText("加载歌曲...")
+        self.reload_btn.setEnabled(False)
+        threading.Thread(target=self._bg_load_tracks, daemon=True).start()
+
+    def _on_reload(self):
+        if not self.current_pl_enc_id:
+            return
+        self._sorted_tracks = None
+        self.apply_btn.setEnabled(False)
+        self.album_progress.setVisible(True)
+        self.album_progress.setMaximum(0)
+        self.album_progress.setValue(0)
+        self.status_lbl.setText("加载歌曲...")
+        self.reload_btn.setEnabled(False)
         threading.Thread(target=self._bg_load_tracks, daemon=True).start()
 
     def _bg_load_tracks(self):
@@ -272,7 +296,10 @@ class MainWindow(QMainWindow):
                 self.status_lbl.setText(f"加载歌曲 {cur}/{total}")
             QTimer.singleShot(0, _do)
 
-        enc_ids, tracks_data = ncm_get_tracks(self.current_pl_enc_id, _on_album_progress)
+        enc_ids, tracks_data = ncm_get_tracks(
+            self.current_pl_enc_id, _on_album_progress,
+            load_publish_time=self.load_time_cb.isChecked()
+        )
         def _done():
             self.album_progress.setVisible(False)
             self.status_lbl.setText("就绪")
@@ -332,6 +359,10 @@ class MainWindow(QMainWindow):
         self._sorted_tracks = None
         _log(f"[_bg_load_tracks] calling _show_tracks directly with {len(ordered_tracks)} tracks")
         self._show_tracks(ordered_tracks)
+
+        def _reload_done():
+            self.reload_btn.setEnabled(True)
+        QTimer.singleShot(0, _reload_done)
 
     def _show_tracks(self, tracks):
         _log(f"[_show_tracks] CALLED with {len(tracks)} tracks, table={self.table is not None}")

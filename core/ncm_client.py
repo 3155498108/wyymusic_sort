@@ -33,7 +33,8 @@ def run_ncm(args: list[str], timeout: int = 60) -> tuple[int, str, str]:
         "XDG_CONFIG_HOME": os.path.join(os.path.expanduser("~"), ".config"),
     }
     cmd = [npm, "exec", "--global", "ncm-cli", "--"] + args
-    r = subprocess.run(cmd, capture_output=True, timeout=timeout, env=env)
+    r = subprocess.run(cmd, capture_output=True, timeout=timeout, env=env,
+                       creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
     return r.returncode, r.stdout.decode("utf-8", errors="replace"), r.stderr.decode("utf-8", errors="replace")
 
 
@@ -49,7 +50,8 @@ def run_ncm_global(args: list[str], timeout: int = 120) -> tuple[int, str, str]:
         "HOME": os.path.expanduser("~"),
     }
     cmd = [npm, "exec", "--global", "ncm-cli", "--"] + args
-    r = subprocess.run(cmd, capture_output=True, timeout=timeout, env=env)
+    r = subprocess.run(cmd, capture_output=True, timeout=timeout, env=env,
+                       creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
     return r.returncode, r.stdout.decode("utf-8", errors="replace"), r.stderr.decode("utf-8", errors="replace")
 
 
@@ -94,7 +96,7 @@ def ncm_login() -> dict | None:
     return None
 
 
-def ncm_get_tracks(playlist_enc_id: str, progress_callback=None) -> tuple[list, list]:
+def ncm_get_tracks(playlist_enc_id: str, progress_callback=None, load_publish_time=True) -> tuple[list, list]:
     """获取歌单 tracks（分页获取最多1000首）：返回 (enc_ids列表, tracks_info列表)"""
     _log(f"[ncm_get_tracks] playlistId={playlist_enc_id}")
     all_tracks = []
@@ -123,45 +125,46 @@ def ncm_get_tracks(playlist_enc_id: str, progress_callback=None) -> tuple[list, 
         if offset >= 1000:
             break
 
-    # 补充 publishTime：用 album get 命令查每张专辑的发行时间
+    # 补充 publishTime（可选）
     album_ids_seen = {}
-    for t in all_tracks:
-        al = t.get("album") or t.get("al")
-        if isinstance(al, dict):
-            al_enc = al.get("id") or al.get("originalId")
-            if al_enc:
-                album_ids_seen[al_enc] = None
+    if load_publish_time:
+        for t in all_tracks:
+            al = t.get("album") or t.get("al")
+            if isinstance(al, dict):
+                al_enc = al.get("id") or al.get("originalId")
+                if al_enc:
+                    album_ids_seen[al_enc] = None
 
-    if album_ids_seen:
-        _log(f"[ncm_get_tracks] fetching publishTime for {len(album_ids_seen)} unique albums via album get")
+        if album_ids_seen:
+            _log(f"[ncm_get_tracks] fetching publishTime for {len(album_ids_seen)} unique albums via album get")
 
-        def _fetch_album(al_enc):
-            rc_al, out_al, _ = run_ncm_global([
-                "album", "get", "--albumId", str(al_enc), "--output", "json"
-            ])
-            pt = 0
-            if rc_al == 0:
-                parsed_al = _parse_json_output(out_al)
-                if parsed_al:
-                    pt = parsed_al.get("data", {}).get("publishTime") or 0
-            return al_enc, pt
+            def _fetch_album(al_enc):
+                rc_al, out_al, _ = run_ncm_global([
+                    "album", "get", "--albumId", str(al_enc), "--output", "json"
+                ])
+                pt = 0
+                if rc_al == 0:
+                    parsed_al = _parse_json_output(out_al)
+                    if parsed_al:
+                        pt = parsed_al.get("data", {}).get("publishTime") or 0
+                return al_enc, pt
 
-        fetched_count = 0
-        with ThreadPoolExecutor(max_workers=3) as executor:
-            futures = {executor.submit(_fetch_album, al_enc): al_enc for al_enc in album_ids_seen}
-            for future in as_completed(futures):
-                al_enc, pt = future.result()
-                album_ids_seen[al_enc] = pt
-                fetched_count += 1
-                if progress_callback:
-                    progress_callback(fetched_count, len(album_ids_seen))
-        _log(f"[ncm_get_tracks] album publishTime results: {dict((k, v) for k, v in album_ids_seen.items())}")
+            fetched_count = 0
+            with ThreadPoolExecutor(max_workers=3) as executor:
+                futures = {executor.submit(_fetch_album, al_enc): al_enc for al_enc in album_ids_seen}
+                for future in as_completed(futures):
+                    al_enc, pt = future.result()
+                    album_ids_seen[al_enc] = pt
+                    fetched_count += 1
+                    if progress_callback:
+                        progress_callback(fetched_count, len(album_ids_seen))
+            _log(f"[ncm_get_tracks] album publishTime results: {dict((k, v) for k, v in album_ids_seen.items())}")
 
     # 把 publishTime 注入每条 track
     for t in all_tracks:
         al = t.get("album") or t.get("al")
         pt = 0
-        if isinstance(al, dict):
+        if load_publish_time and isinstance(al, dict):
             al_enc = al.get("id") or al.get("originalId")
             if al_enc and al_enc in album_ids_seen:
                 pt = album_ids_seen[al_enc] or 0
