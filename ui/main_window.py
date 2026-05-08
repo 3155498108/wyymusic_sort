@@ -33,6 +33,7 @@ class MainWindow(QMainWindow):
         self.current_tracks = []      # 当前有元数据的 tracks
         self._sorted_tracks = None    # 预览排序后的结果
         self._custom_order = None
+        self._pl_total_tracks = 0      # 歌单总歌曲数（从playlist元数据获取）
         self._setup_ui()
         self._check_login()
         QTimer.singleShot(300, self.load_playlists)
@@ -260,6 +261,7 @@ class MainWindow(QMainWindow):
         p = self.playlists[row]
         self.current_pl_enc_id = p.get("id", "")
         self.current_pl_raw_id = p.get("originalId", "")
+        self._pl_total_tracks = p.get("trackCount", 0) or 0  # 歌单总歌曲数
         self._sorted_tracks = None
         self.apply_btn.setEnabled(False)
         self.album_progress.setVisible(True)
@@ -279,6 +281,7 @@ class MainWindow(QMainWindow):
         self.album_progress.setValue(0)
         self.status_lbl.setText("加载歌曲...")
         self.reload_btn.setEnabled(False)
+        self._pl_total_tracks = getattr(self, '_pl_total_tracks', 0) or 0
         threading.Thread(target=self._bg_load_tracks, daemon=True).start()
 
     def _bg_load_tracks(self):
@@ -394,10 +397,15 @@ class MainWindow(QMainWindow):
                     self.table.setItem(i, 6, QTableWidgetItem("-"))
             self.table.resizeRowsToContents()
             self.export_btn.setEnabled(shown > 0)
-            if total > shown:
+            pl_total = getattr(self, '_pl_total_tracks', 0) or 0
+            if pl_total > shown:
+                self.status_lbl.setText(f"已加载 {shown}/{pl_total} 首（歌单较大，部分歌曲暂无法排序）")
+                self.status_lbl.setStyleSheet("color:#e55;")
+            elif total > shown:
                 self.status_lbl.setText(f"显示 {shown}/{total} 首（歌单共 {total} 首）")
             else:
                 self.status_lbl.setText(f"共 {shown} 首")
+                self.status_lbl.setStyleSheet("")
             _log(f"[_show_tracks] DONE, set {shown} rows")
         except Exception as e:
             _log(f"[_show_tracks] EXCEPTION: {type(e).__name__}: {e}")

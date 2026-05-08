@@ -122,8 +122,6 @@ def ncm_get_tracks(playlist_enc_id: str, progress_callback=None, load_publish_ti
         if len(batch) < 500:
             break
         offset += 500
-        if offset >= 1000:
-            break
 
     # 补充 publishTime（可选）
     album_ids_seen = {}
@@ -183,8 +181,18 @@ def ncm_reorder(playlist_enc_id: str, track_ids_ordered: list[str]) -> dict | No
         "--trackIds", track_ids_str,
         "--output", "json"
     ])
+    rc, out, err = run_ncm_global([
+        "playlist", "reorder",
+        "--playlistId", playlist_enc_id,
+        "--trackIds", track_ids_str,
+        "--output", "json"
+    ])
     if rc != 0:
-        return None
+        # 即使失败也尝试解析错误信息
+        err_result = _parse_json_output(out) or {}
+        err_result["_raw_err"] = err[:500] if err else ""
+        err_result["code"] = -1
+        return err_result
     result = _parse_json_output(out)
     return result
 
