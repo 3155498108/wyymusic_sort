@@ -517,7 +517,7 @@ class MainWindow(QMainWindow):
 
         reply = QMessageBox.question(
             self, "确认",
-            f"确定要将「{self.playlist_list.currentItem().text().split('(')[0].strip()}」的 {len(enc_ids)} 首歌曲按当前顺序排序到服务器？\n\n此操作不可撤销。",
+            f"确定要将「{self.playlist_list.currentItem().text().split('(')[0].strip()}」的 {len(enc_ids)} 首歌曲按当前顺序排序到服务器？\n\n此操作不可撤销。\n\n⚠️ 在排序完成之前，请勿在网页或客户端刷新歌单，否则可能导致排序失败！",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
         )
         if reply != QMessageBox.StandardButton.Yes:
@@ -525,13 +525,17 @@ class MainWindow(QMainWindow):
 
         self.status_lbl.setText("正在应用排序到服务器...")
         self.apply_btn.setEnabled(False)
-        threading.Thread(target=self._bg_reorder, args=(enc_ids,), daemon=True).start()
+        result = ncm_reorder(self.current_pl_enc_id, enc_ids)
+        self._do_update_ui(result, enc_ids)
 
     def _bg_reorder(self, enc_ids):
+        _log(f"[_bg_reorder] started, running on main thread")
         result = ncm_reorder(self.current_pl_enc_id, enc_ids)
-        QTimer.singleShot(0, lambda: self._on_reorder_result(result, enc_ids))
+        _log(f"[_bg_reorder] done, calling _do_update_ui")
+        self._do_update_ui(result, enc_ids)
 
-    def _on_reorder_result(self, result, enc_ids):
+    def _do_update_ui(self, result, enc_ids):
+        _log(f"[_do_update_ui] called, result={result}")
         self.apply_btn.setEnabled(True)
         if result is None:
             QMessageBox.warning(self, "错误", "调用 reorder 失败，请检查网络和登录状态")

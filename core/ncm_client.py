@@ -6,9 +6,84 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from logger import _log
 
+def _get_storage_state_path() -> str:
+    config_dir = os.path.join(os.path.expanduser("~"), ".config", "ncm-cli")
+    session_dir = os.path.join(config_dir, "session")
+    return os.path.join(session_dir, "storage-state.json")
+
+
+def _load_cookies_from_credentials() -> tuple[str, str]:
+    """
+    从 ncm-cli 的 credentials.enc.json 获取 cookie
+    使用 Node.js 调用 dpapi 解密
+    """
+    # Node.js 脚本：使用 Windows DPAPI 解密 credentials
+    node_script = r"""
+const path = require('path');
+const fs = require('fs');
+const dpapi = require('dpapi');
+
+const homeDir = process.env.USERPROFILE || process.env.HOME;
+const credPath = path.join(homeDir, '.config/ncm-cli/credentials.enc.json');
+
+if (!fs.existsSync(credPath)) {
+    console.log(JSON.stringify({ music_u: '', csrf: '' }));
+    process.exit(0);
+}
+
+const data = JSON.parse(fs.readFileSync(credPath, 'utf8'));
+const buf = Buffer.from(data.data, 'hex');
+const iv = Buffer.from(data.iv, 'hex');
+const decrypted = dpapi.decrypt(buf, { iv: iv });
+const cred = JSON.parse(decrypted.toString('utf8'));
+
+console.log(JSON.stringify({
+    music_u: cred.cookie?.MUSIC_U || '',
+    csrf: cred.cookie?.__csrf || cred.cookie?.oscs || ''
+}));
+"""
+
+    try:
+        result = subprocess.run(
+            ["node", "-e", node_script],
+            capture_output=True,
+            timeout=15,
+            creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0),
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            parsed = json.loads(result.stdout.strip())
+            _log(f"[_load_cookies_from_credentials] got music_u={bool(parsed.get('music_u'))}, csrf={bool(parsed.get('csrf'))}")
+            return parsed.get("csrf", ""), parsed.get("music_u", "")
+        else:
+            _log(f"[_load_cookies_from_credentials] node failed rc={result.returncode} err={result.stderr[:200]}")
+    except Exception as e:
+        _log(f"[_load_cookies_from_credentials] exception: {e}")
+    return "", ""
+
+
+def _load_cookies_from_storage_state() -> tuple[str, str]:
+    state_path = _get_storage_state_path()
+    if not os.path.exists(state_path):
+        return "", ""
+    try:
+        with open(state_path, "r", encoding="utf-8") as f:
+            state = json.load(f)
+        cookies = state.get("cookies", [])
+        csrf = ""
+        music_u = ""
+        for c in cookies:
+            name = c.get("name", "")
+            if name == "__csrf" or name == "oscs":
+                csrf = c.get("value", "")
+            if name == "MUSIC_U":
+                music_u = c.get("value", "")
+        return csrf, music_u
+    except Exception:
+        return "", ""
+
 
 def _find_npm() -> str:
-    """查找系统 npm.cmd 的路径"""
+    """查找 npm.cmd 路径"""
     possible_npm = [
         r"C:\Program Files\nodejs\npm.cmd",
         r"C:\Program Files (x86)\nodejs\npm.cmd",
@@ -23,6 +98,7 @@ def _find_npm() -> str:
 def run_ncm(args: list[str], timeout: int = 60) -> tuple[int, str, str]:
     """用系统 npm exec --global 调用全局 ncm-cli（login/logout/check 等基本命令）"""
     npm = _find_npm()
+    _log(f"[run_ncm] using npm: {npm}")
     if not npm or not os.path.exists(npm):
         return -1, "", ("错误：未找到 npm。请确保已安装 Node.js。\n"
                            "下载地址：https://nodejs.org/")
@@ -33,8 +109,10 @@ def run_ncm(args: list[str], timeout: int = 60) -> tuple[int, str, str]:
         "XDG_CONFIG_HOME": os.path.join(os.path.expanduser("~"), ".config"),
     }
     cmd = [npm, "exec", "--global", "ncm-cli", "--"] + args
+    _log(f"[run_ncm] cmd: {' '.join(cmd)}")
     r = subprocess.run(cmd, capture_output=True, timeout=timeout, env=env,
                        creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+    _log(f"[run_ncm] rc={r.returncode}, stdout_len={len(r.stdout)}, stderr_len={len(r.stderr)}")
     return r.returncode, r.stdout.decode("utf-8", errors="replace"), r.stderr.decode("utf-8", errors="replace")
 
 
@@ -172,29 +250,108 @@ def ncm_get_tracks(playlist_enc_id: str, progress_callback=None, load_publish_ti
     return enc_ids, all_tracks
 
 
-def ncm_reorder(playlist_enc_id: str, track_ids_ordered: list[str]) -> dict | None:
-    """调用 ncm-cli playlist reorder"""
-    track_ids_str = ",".join(track_ids_ordered)
-    _log(f"[ncm_reorder] calling with {len(track_ids_ordered)} tracks, playlistId={playlist_enc_id}")
+def _do_reorder(playlist_enc_id: str, track_ids: list[str]) -> dict | None:
+    """执行单次 ncm-cli playlist reorder"""
+    _log(f"[_do_reorder] calling with {len(track_ids)} tracks, playlistId={playlist_enc_id}")
+    track_ids_json = json.dumps(track_ids)
     rc, out, err = run_ncm_global([
         "playlist", "reorder",
         "--playlistId", playlist_enc_id,
-        "--trackIds", track_ids_str,
+        "--trackIds", track_ids_json,
         "--output", "json"
     ])
-    _log(f"[ncm_reorder] rc={rc}, out_len={len(out)}, err_len={len(err)}")
+    _log(f"[_do_reorder] rc={rc}, out_len={len(out)}, err_len={len(err)}")
     if rc != 0:
         err_result = _parse_json_output(out) or {}
         err_result["_raw_err"] = err[:500] if err else ""
         err_result["code"] = -1
-        _log(f"[ncm_reorder] failed: {err_result}")
+        _log(f"[_do_reorder] failed: {err_result}")
         return err_result
     result = _parse_json_output(out)
     if result is None:
-        _log(f"[ncm_reorder] rc=0 but JSON parse failed. out={out[:200]}")
-    else:
-        _log(f"[ncm_reorder] success, code={result.get('code')}")
-    return result
+        _log(f"[_do_reorder] rc=0 but JSON parse failed. out={out[:200]}")
+        return {"code": -1, "message": f"JSON parse failed, out={out[:200]}"}
+    code = result.get("code")
+    data = result.get("data")
+    if code != 200 or data is not True:
+        _log(f"[_do_reorder] returned code={code}, data={data}")
+        result["code"] = code if code else -1
+        return result
+    _log(f"[_do_reorder] success, code=200")
+    return {"code": 200, "data": True}
+
+
+def ncm_reorder(playlist_enc_id: str, track_ids_ordered: list[str]) -> dict | None:
+    """
+    调用 ncm-cli playlist reorder，分批执行（每批100首）
+    """
+    _log(f"[ncm_reorder] total tracks={len(track_ids_ordered)}")
+    batch_size = 100
+    all_ok = True
+    last_result = None
+    total_batches = (len(track_ids_ordered) + batch_size - 1) // batch_size
+    for i in range(0, len(track_ids_ordered), batch_size):
+        batch = track_ids_ordered[i:i + batch_size]
+        batch_num = i // batch_size + 1
+        _log(f"[ncm_reorder] executing batch {batch_num}/{total_batches} with {len(batch)} tracks")
+        result = _do_reorder(playlist_enc_id, batch)
+        if result is None or result.get("code") != 200:
+            _log(f"[ncm_reorder] batch {batch_num} failed: {result}")
+            all_ok = False
+            last_result = result
+        else:
+            _log(f"[ncm_reorder] batch {batch_num} success")
+    if all_ok:
+        return {"code": 200, "data": True}
+    return last_result or {"code": -1, "message": "reorder failed"}
+
+
+def _ncm_reorder_direct(playlist_enc_id: str, track_ids_ordered: list[str]) -> dict | None:
+    """
+    使用直接 API 调用网易云音乐进行歌单排序（绕过 ncm-cli 命令行长度限制）
+    端点：POST /api/v3/playlist/track/update
+    参数：ids 是逗号分隔的歌曲 ID 字符串
+    """
+    import requests
+
+    # 先尝试从 storage_state 获取 cookie
+    csrf, music_u = _load_cookies_from_storage_state()
+    # 如果没有，尝试从 credentials 解密获取
+    if not csrf or not music_u:
+        csrf, music_u = _load_cookies_from_credentials()
+    if not csrf or not music_u:
+        _log("[_ncm_reorder_direct] No cookies found, falling back to ncm-cli")
+        return _do_reorder(playlist_enc_id, track_ids_ordered)
+
+    _log(f"[_ncm_reorder_direct] Using direct API with {len(track_ids_ordered)} tracks")
+
+    # 构建请求参数 - ids 是逗号分隔的字符串，不是数组
+    ids_str = ",".join(str(tid) for tid in track_ids_ordered)
+
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        "Referer": "https://music.163.com/",
+        "Content-Type": "application/x-www-form-urlencoded",
+        "Cookie": f"MUSIC_U={music_u}; __csrf={csrf}",
+    }
+
+    data = {
+        "ids": ids_str,
+    }
+
+    try:
+        resp = requests.post(
+            "https://music.163.com/api/v3/playlist/track/update",
+            data=data,
+            headers=headers,
+            timeout=30,
+        )
+        result = resp.json()
+        _log(f"[_ncm_reorder_direct] result code={result.get('code')}, message={result.get('message', '')}")
+        return result
+    except Exception as e:
+        _log(f"[_ncm_reorder_direct] exception: {e}")
+        return {"code": -1, "message": str(e)}
 
 
 def ncm_get_playlists() -> list:
