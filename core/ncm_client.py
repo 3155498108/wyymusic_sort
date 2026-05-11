@@ -429,7 +429,9 @@ def ncm_create_and_fill_playlist(playlist_name: str, track_ids: list[str], progr
     for i in range(0, len(track_ids), batch_size):
         batch = track_ids[i:i + batch_size]
         batch_num = i // batch_size + 1
-        track_ids_json = json.dumps(batch)
+        # ncm-cli playlist add 内部会反转数组顺序，所以先反转再传入
+        reversed_batch = list(reversed(batch))
+        track_ids_json = json.dumps(reversed_batch)
         _log(f"[ncm_create_and_fill_playlist] adding batch {batch_num}/{total_batches} with {len(batch)} tracks")
 
         rc_add, out_add, err_add = run_ncm_global([
