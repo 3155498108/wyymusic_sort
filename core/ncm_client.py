@@ -253,14 +253,15 @@ def ncm_get_tracks(playlist_enc_id: str, progress_callback=None, load_publish_ti
 def _do_reorder(playlist_enc_id: str, track_ids: list[str]) -> dict | None:
     """执行单次 ncm-cli playlist reorder"""
     _log(f"[_do_reorder] calling with {len(track_ids)} tracks, playlistId={playlist_enc_id}")
-    track_ids_json = json.dumps(track_ids)
+    # 逗号分隔格式，避免 JSON 数组格式产生的额外字符 []"
+    track_ids_csv = ",".join(str(tid) for tid in track_ids)
     rc, out, err = run_ncm_global([
         "playlist", "reorder",
         "--playlistId", playlist_enc_id,
-        "--trackIds", track_ids_json,
+        "--trackIds", track_ids_csv,
         "--output", "json"
     ])
-    _log(f"[_do_reorder] rc={rc}, out_len={len(out)}, err_len={len(err)}")
+    _log(f"[_do_reorder] rc={rc}, out={out[:500]}, err={err[:200]}")
     if rc != 0:
         err_result = _parse_json_output(out) or {}
         err_result["_raw_err"] = err[:500] if err else ""
@@ -283,17 +284,15 @@ def _do_reorder(playlist_enc_id: str, track_ids: list[str]) -> dict | None:
 
 def ncm_reorder(playlist_enc_id: str, track_ids_ordered: list[str]) -> dict | None:
     """
-    调用 ncm-cli playlist reorder，分批执行（每批50首）
+    调用 ncm-cli playlist reorder，分批执行（每批30首）
     重要：每批包含到当前位置的全部 ID，因为 API 是替换操作
     例如 371 首分批：
-      Batch 1: IDs 1-50    → 服务器歌单 = 1-50
-      Batch 2: IDs 1-100   → 服务器歌单 = 1-100
-      Batch 3: IDs 1-150   → 服务器歌单 = 1-150
+      Batch 1: IDs 1-30    → 服务器歌单 = 1-30
       ...
-      Batch 8: IDs 1-371   → 服务器歌单 = 1-371
+      Batch 13: IDs 1-371  → 服务器歌单 = 1-371
     """
     _log(f"[ncm_reorder] total tracks={len(track_ids_ordered)}")
-    batch_size = 50
+    batch_size = 30
     all_ok = True
     last_result = None
     total_batches = (len(track_ids_ordered) + batch_size - 1) // batch_size
