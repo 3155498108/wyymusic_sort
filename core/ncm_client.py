@@ -390,3 +390,74 @@ def ncm_get_playlists() -> list:
         offset += 500
     _log(f"[ncm_get_playlists] returning {len(all_playlists)} playlists")
     return all_playlists
+
+
+def ncm_create_and_fill_playlist(playlist_name: str, track_ids: list[str], progress_callback=None) -> dict | None:
+    """
+    创建新歌单并分批添加歌曲（追加到末尾）
+    适用于大歌单排序，也适用于小歌单（作为备选方案）
+    小歌单（<=200）可以直接用 ncm_reorder 更快，但这个方法更稳定
+    """
+    _log(f"[ncm_create_and_fill_playlist] name={playlist_name}, total tracks={len(track_ids)}")
+
+    # 创建新歌单
+    rc_create, out_create, err_create = run_ncm_global([
+        "playlist", "create",
+        "--playlistName", playlist_name,
+        "--output", "json"
+    ])
+    if rc_create != 0:
+        _log(f"[ncm_create_and_fill_playlist] create failed: {err_create[:300]}")
+        return {"code": -1, "message": f"创建歌单失败: {err_create[:200]}"}
+
+    parsed_create = _parse_json_output(out_create)
+    if not parsed_create or parsed_create.get("code") != 200:
+        _log(f"[ncm_create_and_fill_playlist] create parse error: {out_create[:200]}")
+        return {"code": -1, "message": f"创建歌单解析失败: {out_create[:200]}"}
+
+    new_playlist_id = parsed_create.get("data", {}).get("id")
+    if not new_playlist_id:
+        _log(f"[ncm_create_and_fill_playlist] no playlist id in response: {out_create[:200]}")
+        return {"code": -1, "message": f"创建歌单无返回ID: {out_create[:200]}"}
+
+    _log(f"[ncm_create_and_fill_playlist] created playlist id={new_playlist_id}")
+
+    # 分批添加歌曲，每批最多 100 首（JSON 数组格式安全范围内）
+    batch_size = 100
+    total_batches = (len(track_ids) + batch_size - 1) // batch_size
+    for i in range(0, len(track_ids), batch_size):
+        batch = track_ids[i:i + batch_size]
+        batch_num = i // batch_size + 1
+        track_ids_json = json.dumps(batch)
+
+        _log(f"[ncm_create_and_fill_playlist] adding batch {batch_num}/{total_batches} with {len(batch)} tracks")
+
+        rc_add, out_add, err_add = run_ncm_global([
+            "playlist", "add",
+            "--playlistId", new_playlist_id,
+            "--songIdList", track_ids_json,
+            "--output", "json"
+        ])
+
+        if rc_add != 0:
+            _log(f"[ncm_create_and_fill_playlist] batch {batch_num} failed: {err_add[:300]}")
+            return {"code": -1, "message": f"添加歌曲失败 batch{batch_num}: {err_add[:200]}"}
+
+        parsed_add = _parse_json_output(out_add)
+        if not parsed_add or parsed_add.get("code") != 200:
+            _log(f"[ncm_create_and_fill_playlist] batch {batch_num} add parse error: {out_add[:200]}")
+            return {"code": -1, "message": f"添加歌曲解析失败 batch{batch_num}: {out_add[:200]}"}
+
+        _log(f"[ncm_create_and_fill_playlist] batch {batch_num} success")
+        if progress_callback:
+            progress_callback(batch_num, total_batches)
+
+    _log(f"[ncm_create_and_fill_playlist] all {total_batches} batches done, playlist id={new_playlist_id}")
+    return {
+        "code": 200,
+        "data": {
+            "id": new_playlist_id,
+            "name": playlist_name,
+            "trackCount": len(track_ids)
+        }
+    }

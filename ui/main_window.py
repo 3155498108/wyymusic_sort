@@ -14,7 +14,7 @@ from PyQt6.QtGui import QGuiApplication, QClipboard
 from logger import _log
 from core.ncm_client import (
     ncm_login_check, ncm_logout, ncm_login,
-    ncm_get_tracks, ncm_reorder,
+    ncm_get_tracks, ncm_reorder, ncm_create_and_fill_playlist,
 )
 from ui.login_dialog import LoginDialog
 from utils.sort import sort_multi_level, sort_by_custom_order
@@ -261,6 +261,7 @@ class MainWindow(QMainWindow):
         p = self.playlists[row]
         self.current_pl_enc_id = p.get("id", "")
         self.current_pl_raw_id = p.get("originalId", "")
+        self.current_pl_name = p.get("name", "?")  # 用于创建新歌单名字
         self._pl_total_tracks = p.get("trackCount", 0) or 0  # 歌单总歌曲数
         self._sorted_tracks = None
         self.apply_btn.setEnabled(False)
@@ -515,21 +516,67 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "错误", "无法获取歌曲加密ID（歌单可能为空）")
             return
 
-        reply = QMessageBox.question(
-            self, "确认",
-            f"确定要将「{self.playlist_list.currentItem().text().split('(')[0].strip()}」的 {len(enc_ids)} 首歌曲按当前顺序排序到服务器？\n\n此操作不可撤销。\n\n⚠️ 在排序完成之前，请勿在网页或客户端刷新歌单，否则可能导致排序失败！",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
-        )
-        if reply != QMessageBox.StandardButton.Yes:
-            return
+        playlist_name = self.playlist_list.currentItem().text().split("(")[0].strip()
+        is_large = len(enc_ids) > 200
 
-        self.status_lbl.setText("正在应用排序到服务器...")
-        self.apply_btn.setEnabled(False)
-        result = ncm_reorder(self.current_pl_enc_id, enc_ids)
-        self._do_update_ui(result, enc_ids)
+        if is_large:
+            # 大歌单：只能用新建歌单方式
+            reply = QMessageBox.question(
+                self, "确认",
+                f"歌单共 {len(enc_ids)} 首，将创建新歌单「{playlist_name}-排序版」并分批添加歌曲。\n\n此操作不可撤销。\n\n⚠️ 在排序完成之前，请勿在网页或客户端刷新歌单！",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+            )
+            if reply != QMessageBox.StandardButton.Yes:
+                return
+            self.status_lbl.setText("正在创建新歌单并添加歌曲...")
+            self.apply_btn.setEnabled(False)
+            threading.Thread(target=self._bg_create_and_fill, args=(enc_ids,), daemon=True).start()
+        else:
+            # 小歌单：让用户选择方式
+            from PyQt6.QtWidgets import QDialog
+            from PyQt6.QtCore import Qt
+            dlg = QDialog(self)
+            dlg.setWindowTitle("选择排序方式")
+            dlg.setMinimumWidth(400)
+            layout = QVBL2()
+            layout.addWidget(QLabel(f"歌单共 {len(enc_ids)} 首，请选择排序方式："))
+            layout.addSpacing(10)
+
+            def do_new():
+                dlg.accept()
+                new_name = f"{playlist_name}-排序版"
+                self.status_lbl.setText("正在创建新歌单并添加歌曲...")
+                self.apply_btn.setEnabled(False)
+                threading.Thread(target=self._bg_create_and_fill, args=(enc_ids, new_name), daemon=True).start()
+
+            def do_reorder():
+                dlg.accept()
+                self.status_lbl.setText("正在应用排序到服务器...")
+                self.apply_btn.setEnabled(False)
+                threading.Thread(target=self._bg_reorder, args=(enc_ids,), daemon=True).start()
+
+            btn_new = QPushButton(f"🆕 新建歌单「{playlist_name}-排序版」\n（稳定可靠，推荐）")
+            btn_new.setMinimumHeight(60)
+            btn_new.clicked.connect(do_new)
+
+            btn_reorder = QPushButton("♻️ 直接修改原歌单\n（快速，但大歌单可能失败）")
+            btn_reorder.setMinimumHeight(60)
+            btn_reorder.clicked.connect(do_reorder)
+
+            layout.addWidget(btn_new)
+            layout.addWidget(btn_reorder)
+            dlg.setLayout(layout)
+            dlg.exec()
+
+    def _bg_create_and_fill(self, enc_ids, new_name=None):
+        if new_name is None:
+            new_name = f"{getattr(self, 'current_pl_name', '歌单')}-排序版"
+        result = ncm_create_and_fill_playlist(new_name, enc_ids)
+        _log(f"[_bg_create_and_fill] done, calling _do_update_ui")
+        self._do_update_ui_new_playlist(result, enc_ids, new_name)
 
     def _bg_reorder(self, enc_ids):
-        _log(f"[_bg_reorder] started, running on main thread")
+        _log(f"[_bg_reorder] started")
         result = ncm_reorder(self.current_pl_enc_id, enc_ids)
         _log(f"[_bg_reorder] done, calling _do_update_ui")
         self._do_update_ui(result, enc_ids)
@@ -555,6 +602,30 @@ class MainWindow(QMainWindow):
             msg = result.get("message", "未知错误")
             QMessageBox.warning(self, "排序失败", f"服务器返回错误：{msg}\n\ncode: {code}")
             self.status_lbl.setText(f"排序失败：{msg}")
+
+    def _do_update_ui_new_playlist(self, result, enc_ids, new_name):
+        _log(f"[_do_update_ui_new_playlist] called, result={result}")
+        self.apply_btn.setEnabled(True)
+        if result is None:
+            QMessageBox.warning(self, "错误", "创建歌单失败，请检查网络和登录状态")
+            self.status_lbl.setText("创建歌单失败")
+            return
+        code = result.get("code")
+        if code == 200:
+            new_pl_id = result.get("data", {}).get("id", "")
+            track_count = result.get("data", {}).get("trackCount", len(enc_ids))
+            self.status_lbl.setText(f"✅ 新歌单「{new_name}」创建成功（{track_count} 首）")
+            QMessageBox.information(
+                self, "成功",
+                f"已在新歌单「{new_name}」中按正确顺序添加 {track_count} 首歌曲！\n\n"
+                f"新歌单ID：{new_pl_id}\n\n"
+                f"请在网易云音乐 App 或网页版查看。\n\n"
+                f"提示：如果歌单未立即显示，尝试下拉刷新。"
+            )
+        else:
+            msg = result.get("message", "未知错误")
+            QMessageBox.warning(self, "创建失败", f"服务器返回错误：{msg}\n\ncode: {code}")
+            self.status_lbl.setText(f"创建失败：{msg}")
 
     def export_playlist(self):
         rows = self.table.rowCount()
