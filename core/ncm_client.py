@@ -283,16 +283,17 @@ def _do_reorder(playlist_enc_id: str, track_ids: list[str]) -> dict | None:
 
 def ncm_reorder(playlist_enc_id: str, track_ids_ordered: list[str]) -> dict | None:
     """
-    调用 ncm-cli playlist reorder，分批执行（每批100首）
+    调用 ncm-cli playlist reorder，分批执行（每批50首）
     重要：每批包含到当前位置的全部 ID，因为 API 是替换操作
     例如 371 首分批：
-      Batch 1: IDs 1-100   → 服务器歌单 = 1-100
-      Batch 2: IDs 1-200   → 服务器歌单 = 1-200
-      Batch 3: IDs 1-300   → 服务器歌单 = 1-300
-      Batch 4: IDs 1-371   → 服务器歌单 = 1-371
+      Batch 1: IDs 1-50    → 服务器歌单 = 1-50
+      Batch 2: IDs 1-100   → 服务器歌单 = 1-100
+      Batch 3: IDs 1-150   → 服务器歌单 = 1-150
+      ...
+      Batch 8: IDs 1-371   → 服务器歌单 = 1-371
     """
     _log(f"[ncm_reorder] total tracks={len(track_ids_ordered)}")
-    batch_size = 100
+    batch_size = 50
     all_ok = True
     last_result = None
     total_batches = (len(track_ids_ordered) + batch_size - 1) // batch_size
