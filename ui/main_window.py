@@ -585,7 +585,7 @@ class MainWindow(QMainWindow):
         _log(f"[_do_update_ui] called, result={result}")
         self.apply_btn.setEnabled(True)
         if result is None:
-            QMessageBox.warning(self, "错误", "调用 reorder 失败，请检查网络和登录状态")
+            QTimer.singleShot(0, lambda: QMessageBox.warning(self, "错误", "调用 reorder 失败，请检查网络和登录状态"))
             self.status_lbl.setText("应用失败")
             return
         code = result.get("code")
@@ -597,17 +597,17 @@ class MainWindow(QMainWindow):
             self.current_tracks = [enc_to_tr[e] for e in enc_ids if e in enc_to_tr]
             self._sorted_tracks = None
             self.status_lbl.setText(f"✅ 排序成功应用（{len(enc_ids)} 首）")
-            QMessageBox.information(self, "成功", f"已成功将 {len(enc_ids)} 首歌曲排序到服务器！\n\n刷新歌单即可看到新顺序。")
+            QTimer.singleShot(0, lambda: QMessageBox.information(self, "成功", f"已成功将 {len(enc_ids)} 首歌曲排序到服务器！\n\n刷新歌单即可看到新顺序。"))
         else:
             msg = result.get("message", "未知错误")
-            QMessageBox.warning(self, "排序失败", f"服务器返回错误：{msg}\n\ncode: {code}")
+            QTimer.singleShot(0, lambda: QMessageBox.warning(self, "排序失败", f"服务器返回错误：{msg}\n\ncode: {code}"))
             self.status_lbl.setText(f"排序失败：{msg}")
 
     def _do_update_ui_new_playlist(self, result, enc_ids, new_name):
         _log(f"[_do_update_ui_new_playlist] called, result={result}")
         self.apply_btn.setEnabled(True)
         if result is None:
-            QMessageBox.warning(self, "错误", "创建歌单失败，请检查网络和登录状态")
+            QTimer.singleShot(0, lambda: QMessageBox.warning(self, "错误", "创建歌单失败，请检查网络和登录状态"))
             self.status_lbl.setText("创建歌单失败")
             return
         code = result.get("code")
@@ -615,16 +615,16 @@ class MainWindow(QMainWindow):
             new_pl_id = result.get("data", {}).get("id", "")
             track_count = result.get("data", {}).get("trackCount", len(enc_ids))
             self.status_lbl.setText(f"✅ 新歌单「{new_name}」创建成功（{track_count} 首）")
-            QMessageBox.information(
+            QTimer.singleShot(0, lambda: QMessageBox.information(
                 self, "成功",
                 f"已在新歌单「{new_name}」中按正确顺序添加 {track_count} 首歌曲！\n\n"
                 f"新歌单ID：{new_pl_id}\n\n"
                 f"请在网易云音乐 App 或网页版查看。\n\n"
                 f"提示：如果歌单未立即显示，尝试下拉刷新。"
-            )
+            ))
         else:
             msg = result.get("message", "未知错误")
-            QMessageBox.warning(self, "创建失败", f"服务器返回错误：{msg}\n\ncode: {code}")
+            QTimer.singleShot(0, lambda: QMessageBox.warning(self, "创建失败", f"服务器返回错误：{msg}\n\ncode: {code}"))
             self.status_lbl.setText(f"创建失败：{msg}")
 
     def export_playlist(self):
