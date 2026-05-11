@@ -423,17 +423,24 @@ def ncm_create_and_fill_playlist(playlist_name: str, track_ids: list[str], progr
     _log(f"[ncm_create_and_fill_playlist] created playlist id={new_playlist_id}")
 
     # 分批添加歌曲，每批最多 100 首（JSON 数组格式安全范围内）
-    # 关键：每批内部会反转一次，所以先反转每批再传入
-    # 批次顺序保持正序
+    # ncm-cli playlist add 每批内部会反转，批次顺序也会反转
+    # 所以：先反转每批 + 倒序添加批次，双重反转修正
     batch_size = 100
     total_batches = (len(track_ids) + batch_size - 1) // batch_size
+    # 预处理所有批次
+    batches = []
     for i in range(0, len(track_ids), batch_size):
         batch = track_ids[i:i + batch_size]
-        batch_num = i // batch_size + 1
-        # ncm-cli 内部会反转数组顺序，所以先反转再传入
+        batches.append(batch)
+    # 倒序处理批次 + 每批内部反转
+    for bi in range(len(batches) - 1, -1, -1):
+        batch = batches[bi]
+        batch_num = bi + 1
+        # 每批内部反转
         reversed_batch = list(reversed(batch))
         track_ids_json = json.dumps(reversed_batch)
-        _log(f"[ncm_create_and_fill_playlist] adding batch {batch_num}/{total_batches} with {len(batch)} tracks")
+        display_batch = total_batches - bi
+        _log(f"[ncm_create_and_fill_playlist] adding batch {display_batch}/{total_batches} with {len(batch)} tracks")
 
         rc_add, out_add, err_add = run_ncm_global([
             "playlist", "add",
@@ -443,17 +450,17 @@ def ncm_create_and_fill_playlist(playlist_name: str, track_ids: list[str], progr
         ])
 
         if rc_add != 0:
-            _log(f"[ncm_create_and_fill_playlist] batch {batch_num} failed: {err_add[:300]}")
-            return {"code": -1, "message": f"添加歌曲失败 batch{batch_num}: {err_add[:200]}"}
+            _log(f"[ncm_create_and_fill_playlist] batch {display_batch} failed: {err_add[:300]}")
+            return {"code": -1, "message": f"添加歌曲失败 batch{display_batch}: {err_add[:200]}"}
 
         parsed_add = _parse_json_output(out_add)
         if not parsed_add or parsed_add.get("code") != 200:
-            _log(f"[ncm_create_and_fill_playlist] batch {batch_num} add parse error: {out_add[:200]}")
-            return {"code": -1, "message": f"添加歌曲解析失败 batch{batch_num}: {out_add[:200]}"}
+            _log(f"[ncm_create_and_fill_playlist] batch {display_batch} add parse error: {out_add[:200]}")
+            return {"code": -1, "message": f"添加歌曲解析失败 batch{display_batch}: {out_add[:200]}"}
 
-        _log(f"[ncm_create_and_fill_playlist] batch {batch_num} success")
+        _log(f"[ncm_create_and_fill_playlist] batch {display_batch} success")
         if progress_callback:
-            progress_callback(batch_num, total_batches)
+            progress_callback(display_batch, total_batches)
 
     _log(f"[ncm_create_and_fill_playlist] all {total_batches} batches done, playlist id={new_playlist_id}")
     return {
