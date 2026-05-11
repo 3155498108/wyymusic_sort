@@ -423,13 +423,14 @@ def ncm_create_and_fill_playlist(playlist_name: str, track_ids: list[str], progr
     _log(f"[ncm_create_and_fill_playlist] created playlist id={new_playlist_id}")
 
     # 分批添加歌曲，每批最多 100 首（JSON 数组格式安全范围内）
-    # 注意：add 是追加到末尾，正序添加即可保持正确顺序
+    # 关键：每批内部会反转一次，所以先反转每批再传入
+    # 批次顺序保持正序
     batch_size = 100
     total_batches = (len(track_ids) + batch_size - 1) // batch_size
     for i in range(0, len(track_ids), batch_size):
         batch = track_ids[i:i + batch_size]
         batch_num = i // batch_size + 1
-        # ncm-cli playlist add 内部会反转数组顺序，所以先反转再传入
+        # ncm-cli 内部会反转数组顺序，所以先反转再传入
         reversed_batch = list(reversed(batch))
         track_ids_json = json.dumps(reversed_batch)
         _log(f"[ncm_create_and_fill_playlist] adding batch {batch_num}/{total_batches} with {len(batch)} tracks")
