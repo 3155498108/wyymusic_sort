@@ -14,7 +14,7 @@ main.py                 # 入口（~13行），仅负责 QApplication 启动
 │   ├── main_window.py  # MainWindow，主窗口所有逻辑（~550行）
 │   └── login_dialog.py # LoginDialog，扫码登录弹窗
 ├── core/
-│   └── ncm_client.py   # ncm-cli 封装（login/logout/check/tracks/reorder/playlists）。`ncm_reorder` 小歌单（≤200首）用 ncm-cli，大歌单（>200首）用 WeAPI 直接 API
+│   └── ncm_client.py   # ncm-cli 封装（login/logout/check/tracks/reorder/playlists/create/add）。小歌单（≤200首）用 ncm-cli reorder；大歌单（>200首）用 `ncm_create_and_fill_playlist` 新建歌单分批添加歌曲
 └── utils/
     ├── sort.py         # 排序算法（自定义顺序 + 多级排序）
     └── excel.py        # Excel 导入导出
@@ -29,13 +29,13 @@ main.py                 # 入口（~13行），仅负责 QApplication 启动
 | `logger.py` | `_log(msg)` 写日志到 TEMP | 无 |
 | `ui/main_window.py` | 所有 UI 逻辑、信号处理、track 加载/排序/应用 | PyQt6, ncm_client, sort, excel |
 | `ui/login_dialog.py` | 扫码登录弹窗，3秒轮询登录状态 | PyQt6, ncm_client |
-| `core/ncm_client.py` | 调用系统 npm 全局安装的 ncm-cli。`ncm_reorder` 小歌单用 ncm-cli，大歌单用 WeAPI 直接 API | subprocess, json, requests, Crypto |
+| `core/ncm_client.py` | 调用系统 npm 全局安装的 ncm-cli。`ncm_reorder` 小歌单用 ncm-cli，大歌单用 `ncm_create_and_fill_playlist` 新建歌单分批添加歌曲 | subprocess, json, requests, Crypto |
 | `utils/sort.py` | `sort_by_custom_order`, `sort_multi_level`（含艺人+入库时间特殊分组） | re, collections |
 | `utils/excel.py` | `export_table_to_excel`, `import_tracks_from_excel` | openpyxl |
 
 ## 已知问题与限制
 
-1. **大歌单 reorder**：歌单超过200首时，ncm-cli 命令行参数超限。解决方案：`ncm_reorder` 大歌单走 WeAPI 直接 API 调用（`/weapi/playlist/update`），绕过命令行长度限制。
+1. **大歌单 reorder**：歌单超过200首时，ncm-cli `--trackIds` 命令行参数超限（~235 IDs 逗号分隔）。解决方案：大歌单用 `ncm_create_and_fill_playlist` 新建歌单分批添加歌曲，绕过命令行限制。
 2. **凭据加密**：`credentials.enc.json` 使用机器相关密钥加密，无法直接读取。
 
 ## 工作流程
@@ -45,9 +45,9 @@ main.py                 # 入口（~13行），仅负责 QApplication 启动
 3. **加载歌单** → `load_playlists()` 调用 `ncm_get_playlists()`
 4. **选择歌单** → `on_playlist_select()` 调用 `ncm_get_tracks()` 获取曲目，并发获取专辑发行时间
 5. **排序** → `preview()` 调用 `sort_multi_level()` 或 `sort_by_custom_order()` 预览
-6. **应用** → `apply_to_server()` 调用 `ncm_reorder()`
-   - 小歌单（≤200首）：直接调用 ncm-cli reorder
-   - 大歌单（>200首）：WeAPI 直接 API 调用（`/weapi/playlist/update`）
+6. **应用** → `apply_to_server()`
+   - 小歌单（≤200首）：弹窗让用户选择「直接 reorder」或「新建歌单」
+   - 大歌单（>200首）：直接用 `ncm_create_and_fill_playlist` 新建歌单分批添加歌曲
 
 ## ncm-cli 调用约定
 
@@ -57,16 +57,13 @@ ncm-cli 需全局安装（`npm install -g @music163/ncm-cli`）。调用通过 `
 - `ncm_login_check()` → `run_ncm_global(["login", "--check", "--output", "json"])`
 - `ncm_logout()` → `run_ncm_global(["logout"])`
 - `ncm_get_tracks(enc_id)` → `run_ncm_global(["playlist", "tracks", "--playlistId", enc_id, "--limit", "500", "--offset", "0", "--output", "json"])`
-- `ncm_reorder(enc_id, track_ids)` → 小歌单用 ncm-cli，大歌单用 WeAPI 直接 API
+- `ncm_reorder(enc_id, track_ids)` → 小歌单用 ncm-cli，大歌单用 `ncm_create_and_fill_playlist`
+- `ncm_create_and_fill_playlist(name, track_ids)` → `playlist create` + `playlist add` 分批添加歌曲
 - `ncm_get_playlists()` → `run_ncm_global(["playlist", "created", "--limit", "500", "--offset", "0", "--output", "json"])`
 
-## WeAPI 加密
+## WeAPI 加密（未使用）
 
-大歌单直接 API 调用使用 WeAPI 加密（见 `core/ncm_client.py`）：
-
-- **加密算法**：AES-CBC (pkcs7 padding) + RSA (RSA/ECB/PKCS1Padding)
-- **常数**：`modulus=00e0b509f6259df8642dbc35662901477df22677ec152b5ff68ace615bb7b725152b3ab17a876aea8a5aa76d2e417629ec4ee341f56135fccf695280104e0312ecbda92557c93870114af6c9d05c4f7f0c3685b7a46bee255932575cce10b424d813cfe4875d3e82047b97ddef52741d546b8e289dc6935b3ece0462db0a22b8e7`, `pubkey=010001`
-- **流程**：`payload(json)` → AES加密(presetKey) → AES加密(secret) + RSA加密(secret) → `{params, encSecKey}`
+大歌单直接 API 调用原本计划使用 WeAPI 加密（见 `core/ncm_client.py` 的 `_ncm_reorder_direct`），但 DPAPI 解密失败，无法获取 cookie，现已改用新建歌单方案。
 
 ## 关键数据结构
 
