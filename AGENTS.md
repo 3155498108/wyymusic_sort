@@ -61,6 +61,46 @@ ncm-cli 需全局安装（`npm install -g @music163/ncm-cli`）。调用通过 `
 - `ncm_create_and_fill_playlist(name, track_ids)` → `playlist create` + `playlist add` 分批添加歌曲
 - `ncm_get_playlists()` → `run_ncm_global(["playlist", "created", "--limit", "500", "--offset", "0", "--output", "json"])`
 
+## 关键发现（实践经验）
+
+### 1. ncm-cli --trackIds 参数格式
+
+`--trackIds` 接受的是**逗号分隔格式**，不是 JSON 数组格式：
+```bash
+# ✅ 正确（逗号分隔）
+ncm-cli playlist reorder --playlistId <id> --trackIds 'id1,id2,id3'
+
+# ❌ 错误（JSON 数组会增加额外字符 []" ，更容易触发长度限制）
+ncm-cli playlist reorder --playlistId <id> --trackIds '["id1","id2","id3"]'
+```
+
+### 2. ncm-cli 命令行长度限制
+
+实际阈值约 **235 个逗号分隔的 ID**（字符数约 7742），超过会报"网络好像有点问题"。  
+JSON 数组格式因为更长的字符数，阈值更低（约 200）。
+
+### 3. ncm-cli playlist add 的双重反转行为
+
+`playlist add` 在内部对歌曲顺序做了**两层反转**：
+1. **批次内部反转**：传入 `[A,B,C,D]`，实际添加到歌单的是 `[D,C,B,A]`
+2. **批次顺序反转**：batch 0 先 add，最终会在歌单**最后面**；batch 1 后 add，最终会在歌单**最前面**
+
+因此 `ncm_create_and_fill_playlist` 使用了双重修正：
+- 倒序处理批次（batch 3 → batch 2 → batch 1 → batch 0）
+- 每批内部也先反转再传入
+
+### 4. 直接 API 方案失败原因
+
+`POST /api/v3/playlist/track/update` 需要 MUSIC_U 和 __csrf cookie，但：
+- `credentials.enc.json` 使用 Windows DPAPI 加密
+- 打包后的 exe 调用 DPAPI 失败（Error code 13），无法解密获取 cookie
+- 因此无法使用直接 API 方案作为备选
+
+### 5. QMessageBox 在后台线程会冻结 UI
+
+`apply_to_server` 在后台线程执行网络请求后，直接调用 `QMessageBox.warning/information` 会导致 UI 无响应。  
+解决：用 `QTimer.singleShot(0, lambda: ...)` 将弹窗回调放回主线程。
+
 ## WeAPI 加密（未使用）
 
 大歌单直接 API 调用原本计划使用 WeAPI 加密（见 `core/ncm_client.py` 的 `_ncm_reorder_direct`），但 DPAPI 解密失败，无法获取 cookie，现已改用新建歌单方案。
