@@ -27,9 +27,9 @@ main.py                 # 入口（~13行），仅负责 QApplication 启动
 | `main.py` | 入口，QApplication 创建，MainWindow 展示 | PyQt6 |
 | `constants.py` | APP_DIR, BASE_DIR, album_lock, NODE, NCM_CLI | 无 |
 | `logger.py` | `_log(msg)` 写日志到 TEMP | 无 |
-| `ui/main_window.py` | 所有 UI 逻辑、信号处理、track 加载/排序/应用 | PyQt6, ncm_client, sort, excel |
+| `ui/main_window.py` | 所有 UI 逻辑、信号处理、track 加载/排序/应用、多歌单歌手搜索 | PyQt6, ncm_client, sort, excel |
 | `ui/login_dialog.py` | 扫码登录弹窗，3秒轮询登录状态 | PyQt6, ncm_client |
-| `core/ncm_client.py` | 调用系统 npm 全局安装的 ncm-cli。`ncm_reorder` 小歌单用 ncm-cli，大歌单用 `ncm_create_and_fill_playlist` 新建歌单分批添加歌曲 | subprocess, json, requests, Crypto |
+| `core/ncm_client.py` | 调用系统 npm 全局安装的 ncm-cli（优先使用打包内的 ncm-cli.exe，回退到系统 npm）。小歌单用 ncm-cli reorder；大歌单用 `ncm_create_and_fill_playlist` 新建歌单分批添加歌曲 | subprocess, json |
 | `utils/sort.py` | `sort_by_custom_order`, `sort_multi_level`（含艺人+入库时间特殊分组） | re, collections |
 | `utils/excel.py` | `export_table_to_excel`, `import_tracks_from_excel` | openpyxl |
 
@@ -48,6 +48,10 @@ main.py                 # 入口（~13行），仅负责 QApplication 启动
 6. **应用** → `apply_to_server()`
    - 小歌单（≤200首）：弹窗让用户选择「直接 reorder」或「新建歌单」
    - 大歌单（>200首）：直接用 `ncm_create_and_fill_playlist` 新建歌单分批添加歌曲
+7. **多歌单歌手搜索** → `_show_search_artists_dialog()` → `SearchArtistsDialog`
+   - 多选歌单 + 输入歌手名（每行一个，模糊匹配）
+   - 遍历所有歌单的歌曲，匹配任一歌手就去重
+   - 创建新歌单并分批添加歌曲
 
 ## ncm-cli 调用约定
 
@@ -60,6 +64,7 @@ ncm-cli 需全局安装（`npm install -g @music163/ncm-cli`）。调用通过 `
 - `ncm_reorder(enc_id, track_ids)` → 小歌单用 ncm-cli，大歌单用 `ncm_create_and_fill_playlist`
 - `ncm_create_and_fill_playlist(name, track_ids)` → `playlist create` + `playlist add` 分批添加歌曲
 - `ncm_get_playlists()` → `run_ncm_global(["playlist", "created", "--limit", "500", "--offset", "0", "--output", "json"])`
+- `ncm_search_artists_in_playlists(playlist_enc_ids, artist_names, progress_callback)` → 遍历多个歌单匹配歌手，返回 (enc_ids列表, tracks列表)
 
 ## 关键发现（实践经验）
 
@@ -134,10 +139,23 @@ self._custom_order = None            # 自定义顺序列表
 ## 打包
 
 ```bash
-pyinstaller 网易云歌单排序器2.spec
+# 1. 用 pkg 将 ncm-cli 打包成独立 exe
+cd "C:/Users/spenc/AppData/Roaming/npm/node_modules/@music163/ncm-cli"
+npx pkg . -t node18-win-x64 -o e:/jsjzy/pyqt_app/dist/ncm-cli-bundle.exe
+
+# 2. 删除旧目录并重新打包（onedir 模式）
+rm -rf "e:/jsjzy/pyqt_app/dist/网易云歌单排序器2" "e:/jsjzy/pyqt_app/dist/网易云歌单排序器2.exe" "e:/jsjzy/pyqt_app/build"
+cd e:/jsjzy/pyqt_app && pyinstaller 网易云歌单排序器2.spec
+
+# 3. 手动复制 ncm-cli.exe 到输出目录
+cp "e:/jsjzy/pyqt_app/dist/ncm-cli-bundle.exe" "e:/jsjzy/pyqt_app/dist/网易云歌单排序器2/ncm-cli.exe"
 ```
 
 输出目录：`dist/网易云歌单排序器2/`
+
+包含：网易云歌单排序器2.exe + ncm-cli.exe + _internal/
+
+其他人下载后直接运行，无需安装 Node.js。
 
 ## 测试文件说明
 
