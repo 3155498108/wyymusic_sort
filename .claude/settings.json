@@ -1,0 +1,17 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -c \"from core.ncm_client import _weapi_encrypt, _aes_cbc_encrypt; print\\('import ok'\\)\")",
+      "Bash(python -c ' *)",
+      "Bash(node -e \"const dpapi = require\\('dpapi'\\); console.log\\(typeof dpapi.unprotectData\\);\")",
+      "Bash(powershell -ExecutionPolicy Bypass -Command ' *)",
+      "Bash(npm list *)",
+      "Bash(npm bin *)",
+      "Bash(powershell -ExecutionPolicy Bypass -Command \"Get-ChildItem 'C:\\\\Users\\\\spenc\\\\AppData\\\\Roaming\\\\npm' -Filter *.cmd | Select-Object -First 10\")",
+      "Bash(node -e ' *)",
+      "Bash(node -e \"const dpapi = require\\('@primno/dpapi'\\); console.log\\('functions:', Object.keys\\(dpapi\\)\\);\")",
+      "Bash('/c/Program Files/nodejs/node.exe' -e ' *)",
+      "Bash(NODE_PATH=/c/Users/spenc/AppData/Roaming/npm/node_modules node -e ' *)"
+    ]
+  }
+}
