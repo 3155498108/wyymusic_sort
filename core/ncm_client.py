@@ -95,8 +95,39 @@ def _find_npm() -> str:
     return shutil.which("npm.cmd") or ""
 
 
+def _get_bundled_ncm_cli() -> str | None:
+    """查找打包目录内的 ncm-cli.exe"""
+    # PyInstaller 打包后的临时目录
+    if hasattr(os, '_MEIPASS'):
+        bundled = os.path.join(os._MEIPASS, 'ncm-cli.exe')
+        if os.path.exists(bundled):
+            return bundled
+    # 回退到 exe 所在目录
+    exe_dir = os.path.dirname(os.path.abspath(__file__))
+    parent_dir = os.path.dirname(exe_dir)
+    bundled = os.path.join(parent_dir, 'ncm-cli.exe')
+    if os.path.exists(bundled):
+        return bundled
+    return None
+
+
 def run_ncm(args: list[str], timeout: int = 60) -> tuple[int, str, str]:
-    """用系统 npm exec --global 调用全局 ncm-cli（login/logout/check 等基本命令）"""
+    """用系统 npm exec --global 调用全局 ncm-cli（login/logout/check 等基本命令）
+    或使用打包目录内的 ncm-cli.exe"""
+    bundled = _get_bundled_ncm_cli()
+    if bundled:
+        _log(f"[run_ncm] using bundled ncm-cli: {bundled}")
+        env = {
+            "USERPROFILE": os.path.expanduser("~"),
+            "HOME": os.path.expanduser("~"),
+            "XDG_CONFIG_HOME": os.path.join(os.path.expanduser("~"), ".config"),
+        }
+        cmd = [bundled] + args
+        r = subprocess.run(cmd, capture_output=True, timeout=timeout, env=env,
+                          creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+        _log(f"[run_ncm] rc={r.returncode}")
+        return r.returncode, r.stdout.decode("utf-8", errors="replace"), r.stderr.decode("utf-8", errors="replace")
+
     npm = _find_npm()
     _log(f"[run_ncm] using npm: {npm}")
     if not npm or not os.path.exists(npm):
@@ -117,7 +148,20 @@ def run_ncm(args: list[str], timeout: int = 60) -> tuple[int, str, str]:
 
 
 def run_ncm_global(args: list[str], timeout: int = 300) -> tuple[int, str, str]:
-    """用系统 npm exec --global 调用全局 ncm-cli（playlist 等命令）"""
+    """用系统 npm exec --global 调用全局 ncm-cli（playlist 等命令）
+    或使用打包目录内的 ncm-cli.exe"""
+    bundled = _get_bundled_ncm_cli()
+    if bundled:
+        _log(f"[run_ncm_global] using bundled ncm-cli: {bundled}")
+        env = {
+            "USERPROFILE": os.path.expanduser("~"),
+            "HOME": os.path.expanduser("~"),
+        }
+        cmd = [bundled] + args
+        r = subprocess.run(cmd, capture_output=True, timeout=timeout, env=env,
+                          creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+        return r.returncode, r.stdout.decode("utf-8", errors="replace"), r.stderr.decode("utf-8", errors="replace")
+
     npm = _find_npm()
     if not npm or not os.path.exists(npm):
         return -1, "", ("错误：未找到 npm。请确保已安装 Node.js。\n"
@@ -460,7 +504,10 @@ def ncm_create_and_fill_playlist(playlist_name: str, track_ids: list[str], progr
 
         _log(f"[ncm_create_and_fill_playlist] batch {display_batch} success")
         if progress_callback:
-            progress_callback(display_batch, total_batches)
+            try:
+                progress_callback(display_batch, total_batches, f"正在创建歌单... {display_batch}/{total_batches}")
+            except TypeError:
+                progress_callback(display_batch, total_batches)
 
     _log(f"[ncm_create_and_fill_playlist] all {total_batches} batches done, playlist id={new_playlist_id}")
     return {
@@ -471,3 +518,77 @@ def ncm_create_and_fill_playlist(playlist_name: str, track_ids: list[str], progr
             "trackCount": len(track_ids)
         }
     }
+
+
+def ncm_search_artists_in_playlists(
+    playlist_enc_ids: list[str],
+    artist_names: list[str],
+    progress_callback=None
+) -> tuple[list[str], list[dict]]:
+    """
+    在多个歌单中搜索多个歌手的歌曲并去重
+
+    Args:
+        playlist_enc_ids: 歌单加密ID列表
+        artist_names: 歌手名列表（模糊匹配，包含即匹配）
+        progress_callback: 回调 (current, total, status_msg)
+
+    Returns:
+        (enc_ids列表, tracks_info列表)
+    """
+    _log(f"[ncm_search_artists_in_playlists] searching {len(artist_names)} artists in {len(playlist_enc_ids)} playlists")
+
+    seen_enc_ids: set[str] = set()
+    result_tracks: list[dict] = []
+
+    total_pls = len(playlist_enc_ids)
+
+    # 第一阶段：获取所有歌单的歌曲数量，用于进度预估
+    pl_track_counts: list[int] = []
+    for idx, pl_enc_id in enumerate(playlist_enc_ids):
+        if progress_callback:
+            progress_callback(idx + 1, total_pls, f"正在加载歌单... {idx + 1}/{total_pls}")
+        _, tracks = ncm_get_tracks(pl_enc_id, progress_callback=None, load_publish_time=False)
+        pl_track_counts.append(len(tracks))
+
+    total_tracks_est = sum(pl_track_counts)
+    _log(f"[ncm_search_artists_in_playlists] total tracks estimate: {total_tracks_est}")
+
+    processed = 0
+    for idx, (pl_enc_id, track_count) in enumerate(zip(playlist_enc_ids, pl_track_counts)):
+        enc_ids, tracks = ncm_get_tracks(pl_enc_id, progress_callback=None, load_publish_time=False)
+
+        for track in tracks:
+            processed += 1
+            if progress_callback:
+                progress_callback(processed, total_tracks_est, f"正在搜索第 {idx + 1}/{total_pls} 个歌单，已匹配 {len(result_tracks)} 首...")
+
+            artists = track.get("ar") or track.get("artists") or []
+            if not artists:
+                continue
+
+            matched = False
+            for artist in artists:
+                artist_name = artist.get("name", "")
+                if not artist_name:
+                    continue
+                for search_name in artist_names:
+                    if search_name.strip() and search_name.strip() in artist_name:
+                        matched = True
+                        break
+                if matched:
+                    break
+
+            if matched:
+                enc_id = track.get("id") or track.get("encId")
+                if enc_id and enc_id not in seen_enc_ids:
+                    seen_enc_ids.add(enc_id)
+                    result_tracks.append(track)
+
+    # 搜索完成后发最终进度
+    if progress_callback:
+        progress_callback(total_tracks_est, total_tracks_est, f"搜索完成，已匹配 {len(result_tracks)} 首，正在创建歌单...")
+
+    _log(f"[ncm_search_artists_in_playlists] found {len(result_tracks)} unique tracks")
+    enc_ids_result = [t.get("id") or t.get("encId") for t in result_tracks]
+    return enc_ids_result, result_tracks

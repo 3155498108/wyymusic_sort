@@ -2,19 +2,22 @@
 import datetime
 import os
 import threading
+import traceback
 
 from PyQt6.QtWidgets import (QMainWindow, QWidget, QHBoxLayout, QVBoxLayout,
                              QListWidget, QTableWidget, QTableWidgetItem,
                              QPushButton, QComboBox, QLabel, QMessageBox, QHeaderView,
                              QAbstractItemView, QGroupBox, QCheckBox,
-                             QVBoxLayout as QVBL2, QProgressBar)
+                             QVBoxLayout as QVBL2, QProgressBar, QDialog, QTextEdit,
+                             QCheckBox as QChkBx, QLineEdit, QScrollArea)
 from PyQt6.QtCore import Qt, QTimer
-from PyQt6.QtGui import QGuiApplication, QClipboard
+from PyQt6.QtGui import QGuiApplication, QClipboard, QColor
 
 from logger import _log
 from core.ncm_client import (
     ncm_login_check, ncm_logout, ncm_login,
     ncm_get_tracks, ncm_reorder, ncm_create_and_fill_playlist,
+    ncm_search_artists_in_playlists,
 )
 from ui.login_dialog import LoginDialog
 from utils.sort import sort_multi_level, sort_by_custom_order
@@ -181,6 +184,11 @@ class MainWindow(QMainWindow):
         copy_btn.setStyleSheet("background:#1db100; color:white; font-weight:bold; padding:5px 14px;")
         copy_btn.clicked.connect(self.copy_result)
         sl.addWidget(copy_btn)
+
+        self.search_artists_btn = QPushButton("🔍 多歌单歌手搜索")
+        self.search_artists_btn.setStyleSheet("background:#09b9d4; color:white; font-weight:bold; padding:5px 14px;")
+        self.search_artists_btn.clicked.connect(self._show_search_artists_dialog)
+        sl.addWidget(self.search_artists_btn)
 
         sort_group.setLayout(sl)
         right.addWidget(sort_group)
@@ -683,3 +691,178 @@ class MainWindow(QMainWindow):
         QApplication.clipboard().setText(text)
         self.status_lbl.setText(f"已复制 {len(ids)} 个歌曲 ID 到剪贴板")
         QMessageBox.information(self, "已复制", f"已复制 {len(ids)} 个歌曲 ID 到剪贴板")
+
+    def _show_search_artists_dialog(self):
+        if not self.playlists:
+            QMessageBox.information(self, "提示", "请先加载歌单")
+            return
+        dlg = SearchArtistsDialog(self.playlists, self)
+        dlg.exec()
+        if dlg.result_playlist_id:
+            QTimer.singleShot(300, self.load_playlists)
+
+
+class SearchArtistsDialog(QDialog):
+    def __init__(self, playlists, parent=None):
+        super().__init__(parent)
+        self.playlists = playlists
+        self.result_playlist_id = None
+        self._setup_ui()
+
+    def _setup_ui(self):
+        self.setWindowTitle("多歌单歌手搜索创建歌单")
+        self.setMinimumSize(600, 500)
+
+        layout = QVBoxLayout(self)
+
+        layout.addWidget(QLabel("选择要搜索的歌单（可多选）："))
+        self.playlist_cbs = []
+        self.playlist_cb_container = QVBoxLayout()
+        for p in self.playlists:
+            name = p.get("name", "?")
+            count = p.get("trackCount", 0) or 0
+            cb = QChkBx(f"{name}  ({count}首)")
+            cb.setChecked(False)
+            self.playlist_cbs.append(cb)
+            self.playlist_cb_container.addWidget(cb)
+        scroll_container = QWidget()
+        scroll_container.setLayout(self.playlist_cb_container)
+        scroll = QScrollArea()
+        scroll.setWidget(scroll_container)
+        scroll.setWidgetResizable(True)
+        scroll.setMaximumHeight(150)
+        layout.addWidget(scroll)
+
+        layout.addWidget(QLabel("歌手名（每行一个，支持模糊匹配）："))
+        self.artist_text = QTextEdit()
+        self.artist_text.setPlaceholderText("周杰伦\n林俊杰\n五月天")
+        self.artist_text.setMaximumHeight(120)
+        self.artist_text.setAcceptRichText(False)
+        self.artist_text.setTextColor(QColor("#ffffff"))
+        self.artist_text.setTextBackgroundColor(QColor("#1a1a1a"))
+        self.artist_text.setStyleSheet("""
+            QTextEdit {
+                background: #1a1a1a;
+                border: 1px solid #444444;
+            }
+        """)
+        layout.addWidget(self.artist_text)
+
+        layout.addWidget(QLabel("新歌单名称："))
+        self.name_edit = QLineEdit()
+        self.name_edit.setPlaceholderText("歌手精选集")
+        layout.addWidget(self.name_edit)
+
+        self.progress_lbl = QLabel("")
+        self.progress_lbl.setStyleSheet("color:#666; font-size:12px;")
+        layout.addWidget(self.progress_lbl)
+
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setFixedHeight(8)
+        self.progress_bar.setTextVisible(False)
+        self.progress_bar.setStyleSheet("QProgressBar { border: none; background: #e0e0e0; border-radius: 4px; } QProgressBar::chunk { background: #1db100; border-radius: 4px; }")
+        self.progress_bar.setVisible(False)
+        layout.addWidget(self.progress_bar)
+
+        btns = QHBoxLayout()
+        btns.addStretch()
+        self.cancel_btn = QPushButton("取消")
+        self.cancel_btn.clicked.connect(self.reject)
+        btns.addWidget(self.cancel_btn)
+
+        self.confirm_btn = QPushButton("搜索并创建歌单")
+        self.confirm_btn.setStyleSheet("background:#1db100; color:white; font-weight:bold; padding:6px 20px;")
+        self.confirm_btn.clicked.connect(self._do_search)
+        btns.addWidget(self.confirm_btn)
+        layout.addLayout(btns)
+
+    def _do_search(self):
+        selected_pls = []
+        for i, cb in enumerate(self.playlist_cbs):
+            if cb.isChecked() and i < len(self.playlists):
+                selected_pls.append(self.playlists[i])
+
+        if not selected_pls:
+            QMessageBox.warning(self, "提示", "请至少选择一个歌单")
+            return
+
+        artist_text = self.artist_text.toPlainText().strip()
+        if not artist_text:
+            QMessageBox.warning(self, "提示", "请输入至少一个歌手名")
+            return
+        artist_names = [a.strip() for a in artist_text.split("\n") if a.strip()]
+        if not artist_names:
+            QMessageBox.warning(self, "提示", "请输入至少一个歌手名")
+            return
+
+        new_name = self.name_edit.text().strip()
+        if not new_name:
+            QMessageBox.warning(self, "提示", "请输入新歌单名称")
+            return
+
+        self.confirm_btn.setEnabled(False)
+        self.cancel_btn.setEnabled(False)
+        self.progress_bar.setVisible(True)
+        self.progress_lbl.setText("正在搜索...")
+
+        playlist_enc_ids = [p.get("id", "") for p in selected_pls]
+
+        def _bg():
+            try:
+                enc_ids, tracks = ncm_search_artists_in_playlists(
+                    playlist_enc_ids, artist_names, None
+                )
+            except Exception as e:
+                _log(f"[_bg] search exception: {e}")
+                QTimer.singleShot(0, lambda: (
+                    self.progress_bar.setVisible(False),
+                    self.progress_lbl.setText(""),
+                    QMessageBox.warning(self, "错误", f"搜索失败: {e}"),
+                    self.confirm_btn.setEnabled(True),
+                    self.cancel_btn.setEnabled(True),
+                ))
+                return
+
+            self.progress_lbl.setText(f"搜索完成，找到 {len(enc_ids)} 首，正在创建歌单...")
+            self.progress_bar.setVisible(False)
+
+            if not enc_ids:
+                QTimer.singleShot(0, lambda: (
+                    self.progress_lbl.setText(""),
+                    QMessageBox.information(self, "提示", "未找到匹配歌手的歌曲"),
+                    self.confirm_btn.setEnabled(True),
+                    self.cancel_btn.setEnabled(True),
+                ))
+                return
+
+            try:
+                result = ncm_create_and_fill_playlist(new_name, enc_ids, None)
+            except Exception as e:
+                _log(f"[_bg] create exception: {e}")
+                QTimer.singleShot(0, lambda: (
+                    self.progress_lbl.setText(""),
+                    QMessageBox.warning(self, "错误", f"创建歌单失败: {e}"),
+                    self.confirm_btn.setEnabled(True),
+                    self.cancel_btn.setEnabled(True),
+                ))
+                return
+
+            def _done():
+                self.progress_lbl.setText("")
+                if result and result.get("code") == 200:
+                    new_pl_id = result.get("data", {}).get("id", "")
+                    track_count = result.get("data", {}).get("trackCount", len(enc_ids))
+                    self.result_playlist_id = new_pl_id
+                    self.progress_lbl.setText(f"✅ 创建成功！共 {track_count} 首，歌单ID：{new_pl_id}")
+                    self.confirm_btn.setText("关闭")
+                    self.confirm_btn.clicked.disconnect()
+                    self.confirm_btn.clicked.connect(self.accept)
+                else:
+                    msg_err = result.get("message", "未知错误") if result else "创建失败"
+                    self.progress_lbl.setText(f"❌ 创建失败：{msg_err}")
+                    self.confirm_btn.setEnabled(True)
+                    self.cancel_btn.setEnabled(True)
+
+            _done()
+
+        threading.Thread(target=_bg, daemon=True).start()
