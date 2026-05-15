@@ -12,7 +12,8 @@ main.py                 # 入口（~13行），仅负责 QApplication 启动
 ├── logger.py           # 日志工具，写入 TEMP/ncm_sorter.log
 ├── ui/
 │   ├── main_window.py  # MainWindow，主窗口所有逻辑（~550行）
-│   └── login_dialog.py # LoginDialog，扫码登录弹窗
+│   ├── login_dialog.py # LoginDialog，扫码登录弹窗
+│   └── config_dialog.py # ConfigDialog，首次配置 AppID/PrivateKey 弹窗
 ├── core/
 │   └── ncm_client.py   # ncm-cli 封装（login/logout/check/tracks/reorder/playlists/create/add）。小歌单（≤200首）用 ncm-cli reorder；大歌单（>200首）用 `ncm_create_and_fill_playlist` 新建歌单分批添加歌曲
 └── utils/
@@ -25,7 +26,8 @@ main.py                 # 入口（~13行），仅负责 QApplication 启动
 | 模块 | 职责 | 外部依赖 |
 |------|------|---------|
 | `main.py` | 入口，QApplication 创建，MainWindow 展示 | PyQt6 |
-| `constants.py` | APP_DIR, BASE_DIR, album_lock, NODE, NCM_CLI | 无 |
+| `constants.py` | APP_DIR, BASE_DIR, CONFIG_FILE, album_lock, NODE, NCM_CLI | 无 |
+| `ui/config_dialog.py` | AppID/PrivateKey 配置弹窗，首次启动时检测是否已配置，未配置则弹出对话框 | PyQt6, constants |
 | `logger.py` | `_log(msg)` 写日志到 TEMP | 无 |
 | `ui/main_window.py` | 所有 UI 逻辑、信号处理、track 加载/排序/应用、多歌单歌手搜索 | PyQt6, ncm_client, sort, excel |
 | `ui/login_dialog.py` | 扫码登录弹窗，3秒轮询登录状态 | PyQt6, ncm_client |
@@ -40,7 +42,7 @@ main.py                 # 入口（~13行），仅负责 QApplication 启动
 
 ## 工作流程
 
-1. **启动** → MainWindow 初始化 → `_check_login()` 检查登录状态
+1. **启动** → MainWindow 初始化 → `_ensure_config()` 检查 AppID/PrivateKey 配置，未配置则弹出 ConfigDialog
 2. **登录** → 未登录显示 LoginDialog（扫码 + 3秒轮询）
 3. **加载歌单** → `load_playlists()` 调用 `ncm_get_playlists()`
 4. **选择歌单** → `on_playlist_select()` 调用 `ncm_get_tracks()` 获取曲目，并发获取专辑发行时间

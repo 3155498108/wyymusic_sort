@@ -23,4 +23,5 @@ GLOBAL_NCM_CLI = os.path.join(
     os.path.expanduser("~"), "AppData", "Roaming", "npm",
     "node_modules", "@music163", "ncm-cli", "dist", "index.js"
 )
+CONFIG_FILE = os.path.join(BASE_DIR, "config.json")
 LOCAL_NCM_CLI = os.path.join(BASE_DIR, "ncm-cli", "dist", "index.js")

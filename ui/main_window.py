@@ -14,12 +14,14 @@ from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QGuiApplication, QClipboard, QColor
 
 from logger import _log
+from constants import CONFIG_FILE
 from core.ncm_client import (
     ncm_login_check, ncm_logout, ncm_login,
     ncm_get_tracks, ncm_reorder, ncm_create_and_fill_playlist,
     ncm_search_artists_in_playlists,
 )
 from ui.login_dialog import LoginDialog
+from ui.config_dialog import ConfigDialog
 from utils.sort import sort_multi_level, sort_by_custom_order
 from utils.excel import export_table_to_excel, import_tracks_from_excel
 
@@ -38,8 +40,16 @@ class MainWindow(QMainWindow):
         self._custom_order = None
         self._pl_total_tracks = 0      # 歌单总歌曲数（从playlist元数据获取）
         self._setup_ui()
+        self._ensure_config()
         self._check_login()
         QTimer.singleShot(300, self.load_playlists)
+
+    def _ensure_config(self):
+        if not os.path.exists(CONFIG_FILE):
+            dlg = ConfigDialog(self)
+            if dlg.exec() != ConfigDialog.DialogCode.Accepted:
+                import sys
+                sys.exit(0)
 
     def _check_login(self):
         status = ncm_login_check()
