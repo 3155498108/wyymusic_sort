@@ -2,24 +2,27 @@
 import datetime
 import os
 import threading
-import traceback
 
 from PyQt6.QtWidgets import (QMainWindow, QWidget, QHBoxLayout, QVBoxLayout,
                              QListWidget, QTableWidget, QTableWidgetItem,
                              QPushButton, QComboBox, QLabel, QMessageBox, QHeaderView,
                              QAbstractItemView, QGroupBox, QCheckBox,
-                             QVBoxLayout as QVBL2, QProgressBar, QDialog, QTextEdit,
-                             QCheckBox as QChkBx, QLineEdit, QScrollArea)
-from PyQt6.QtCore import Qt, QTimer
-from PyQt6.QtGui import QGuiApplication, QClipboard, QColor
+                             QVBoxLayout as QVBL2, QProgressBar, QDialog,
+                             QApplication, QFileDialog)
+from PyQt6.QtCore import QTimer
 
 from logger import _log
+from constants import CONFIG_FILE
 from core.ncm_client import (
     ncm_login_check, ncm_logout, ncm_login,
     ncm_get_tracks, ncm_reorder, ncm_create_and_fill_playlist,
-    ncm_search_artists_in_playlists,
+    ncm_fill_publish_time,
 )
 from ui.login_dialog import LoginDialog
+from ui.config_dialog import ConfigDialog
+from ui.ai_sort_dialog import AISortDialog
+from ui.search_dialog import SearchDialog
+from ui.ui_thread import post
 from utils.sort import sort_multi_level, sort_by_custom_order
 from utils.excel import export_table_to_excel, import_tracks_from_excel
 
@@ -38,8 +41,16 @@ class MainWindow(QMainWindow):
         self._custom_order = None
         self._pl_total_tracks = 0      # 歌单总歌曲数（从playlist元数据获取）
         self._setup_ui()
+        self._ensure_config()
         self._check_login()
         QTimer.singleShot(300, self.load_playlists)
+
+    def _ensure_config(self):
+        if not os.path.exists(CONFIG_FILE):
+            dlg = ConfigDialog(self)
+            if dlg.exec() != ConfigDialog.DialogCode.Accepted:
+                import sys
+                sys.exit(0)
 
     def _check_login(self):
         status = ncm_login_check()
@@ -115,8 +126,11 @@ class MainWindow(QMainWindow):
         self.reload_btn.setEnabled(False)
         left.addWidget(self.reload_btn)
 
-        self.load_time_cb = QCheckBox("加载发行时间")
-        self.load_time_cb.setChecked(True)
+        self.load_time_cb = QCheckBox("加载发行时间（较慢）")
+        self.load_time_cb.setChecked(False)
+        self.load_time_cb.setToolTip(
+            "专辑发行时间要逐张专辑请求，专辑多的大歌单会明显变慢。\n"
+            "不勾选时，排序用到「专辑发行时间」会提示按需加载（结果会缓存）。")
         self.load_time_cb.setStyleSheet("color:#666; font-size:12px;")
         left.addWidget(self.load_time_cb)
 
@@ -185,10 +199,16 @@ class MainWindow(QMainWindow):
         copy_btn.clicked.connect(self.copy_result)
         sl.addWidget(copy_btn)
 
-        self.search_artists_btn = QPushButton("🔍 多歌单歌手搜索")
+        self.search_artists_btn = QPushButton("🔍 搜索歌曲/专辑")
+        self.search_artists_btn.setToolTip("跨歌单按歌手/专辑/歌曲名筛选，或全网搜索专辑，收进新歌单")
         self.search_artists_btn.setStyleSheet("background:#09b9d4; color:white; font-weight:bold; padding:5px 14px;")
-        self.search_artists_btn.clicked.connect(self._show_search_artists_dialog)
+        self.search_artists_btn.clicked.connect(self._show_search_dialog)
         sl.addWidget(self.search_artists_btn)
+
+        self.ai_sort_btn = QPushButton("🤖 AI 排序")
+        self.ai_sort_btn.setStyleSheet("background:#6366f1; color:white; font-weight:bold; padding:5px 14px;")
+        self.ai_sort_btn.clicked.connect(self._show_ai_sort_dialog)
+        sl.addWidget(self.ai_sort_btn)
 
         sort_group.setLayout(sl)
         right.addWidget(sort_group)
@@ -243,16 +263,16 @@ class MainWindow(QMainWindow):
         # 先检查登录状态
         login_status = ncm_login_check()
         if not login_status.get("success"):
-            QTimer.singleShot(0, lambda: self.status_lbl.setText("⚠ 未登录，请先扫码登录"))
+            post(self.status_lbl.setText, "⚠ 未登录，请先扫码登录")
             return
         from core.ncm_client import ncm_get_playlists
         self.playlists = ncm_get_playlists()
         if not self.playlists:
             # ncm_get_playlists 失败，可能是全局 ncm-cli 未安装
-            QTimer.singleShot(0, lambda: self.status_lbl.setText(
-                "⚠ 获取歌单失败。请确保已安装全局 ncm-cli：\nnpm install -g @music163/ncm-cli"))
+            post(self.status_lbl.setText,
+                 "⚠ 获取歌单失败。请确保已安装全局 ncm-cli：\nnpm install -g @music163/ncm-cli")
             return
-        QTimer.singleShot(0, self._show_pl)
+        post(self._show_pl)
 
     def _show_pl(self):
         for p in self.playlists:
@@ -271,6 +291,7 @@ class MainWindow(QMainWindow):
         self.current_pl_raw_id = p.get("originalId", "")
         self.current_pl_name = p.get("name", "?")  # 用于创建新歌单名字
         self._pl_total_tracks = p.get("trackCount", 0) or 0  # 歌单总歌曲数
+        self._load_pt = self.load_time_cb.isChecked()
         self._sorted_tracks = None
         self.apply_btn.setEnabled(False)
         self.album_progress.setVisible(True)
@@ -291,31 +312,28 @@ class MainWindow(QMainWindow):
         self.status_lbl.setText("加载歌曲...")
         self.reload_btn.setEnabled(False)
         self._pl_total_tracks = getattr(self, '_pl_total_tracks', 0) or 0
+        self._load_pt = self.load_time_cb.isChecked()
         threading.Thread(target=self._bg_load_tracks, daemon=True).start()
 
     def _bg_load_tracks(self):
         _log(f"[_bg_load_tracks] start, playlistId={self.current_pl_enc_id}")
-        total_albums = 0
-        fetched_albums = [0]  # 用列表包装以便在内层函数修改
 
         def _on_album_progress(cur, total):
-            total_albums = total
-            fetched_albums[0] = cur
             def _do():
                 self.album_progress.setVisible(True)
                 self.album_progress.setMaximum(total)
                 self.album_progress.setValue(cur)
                 self.status_lbl.setText(f"加载歌曲 {cur}/{total}")
-            QTimer.singleShot(0, _do)
+            post(_do)
 
         enc_ids, tracks_data = ncm_get_tracks(
             self.current_pl_enc_id, _on_album_progress,
-            load_publish_time=self.load_time_cb.isChecked()
+            load_publish_time=getattr(self, "_load_pt", True)
         )
         def _done():
             self.album_progress.setVisible(False)
             self.status_lbl.setText("就绪")
-        QTimer.singleShot(0, _done)
+        post(_done)
         _log(f"[_bg_load_tracks] got enc_ids: {enc_ids is not None}, count={len(enc_ids) if enc_ids else 0}")
         self.server_track_ids = enc_ids or []
 
@@ -369,42 +387,44 @@ class MainWindow(QMainWindow):
             ordered_tracks.append(tr)
         _log(f"[_bg_load_tracks] first ordered_track keys={list(ordered_tracks[0].keys()) if ordered_tracks else 'empty'}")
         self._sorted_tracks = None
-        _log(f"[_bg_load_tracks] calling _show_tracks directly with {len(ordered_tracks)} tracks")
-        self._show_tracks(ordered_tracks)
+        _log(f"[_bg_load_tracks] scheduling _show_tracks with {len(ordered_tracks)} tracks")
+        # UI 更新必须回到主线程
+        post(self._show_tracks, ordered_tracks)
+        post(self.reload_btn.setEnabled, True)
 
-        def _reload_done():
-            self.reload_btn.setEnabled(True)
-        QTimer.singleShot(0, _reload_done)
+    def _fill_table(self, tracks):
+        """把 tracks 填充到表格（供加载与预览共用）"""
+        self.table.setRowCount(len(tracks))
+        for i, tr in enumerate(tracks):
+            self.table.setItem(i, 0, QTableWidgetItem(str(i + 1)))
+            self.table.setItem(i, 1, QTableWidgetItem(str(tr.get("name", ""))))
+            ar = tr.get("fullArtists") or tr.get("artists") or tr.get("ar") or []
+            self.table.setItem(i, 2, QTableWidgetItem("/".join(a.get("name", "") for a in ar if a.get("name"))))
+            al = tr.get("album") or tr.get("al") or {}
+            al_name = al.get("name", "") if isinstance(al, dict) else ""
+            self.table.setItem(i, 3, QTableWidgetItem(al_name))
+            track_id = tr.get("encId") or tr.get("id", "")
+            self.table.setItem(i, 4, QTableWidgetItem(str(track_id)))
+            add_time = (tr.get("extMap") or {}).get("addTime", 0) or tr.get("_addTime", 0)
+            if add_time:
+                dt = datetime.datetime.fromtimestamp(add_time / 1000)
+                self.table.setItem(i, 5, QTableWidgetItem(dt.strftime("%Y-%m-%d %H:%M")))
+            else:
+                self.table.setItem(i, 5, QTableWidgetItem("-"))
+            pt = tr.get("publishTime", 0)
+            if pt and pt > 0:
+                pub_dt = datetime.datetime.fromtimestamp(pt / 1000)
+                self.table.setItem(i, 6, QTableWidgetItem(pub_dt.strftime("%Y-%m-%d")))
+            else:
+                self.table.setItem(i, 6, QTableWidgetItem("-"))
+        self.table.resizeRowsToContents()
 
     def _show_tracks(self, tracks):
-        _log(f"[_show_tracks] CALLED with {len(tracks)} tracks, table={self.table is not None}")
+        _log(f"[_show_tracks] CALLED with {len(tracks)} tracks")
         try:
             total = len(self.server_track_ids)
             shown = len(tracks)
-            self.table.setRowCount(shown)
-            for i, tr in enumerate(tracks):
-                self.table.setItem(i, 0, QTableWidgetItem(str(i + 1)))
-                self.table.setItem(i, 1, QTableWidgetItem(str(tr.get("name", ""))))
-                ar = tr.get("fullArtists") or tr.get("artists") or tr.get("ar") or []
-                self.table.setItem(i, 2, QTableWidgetItem("/".join(a.get("name", "") for a in ar if a.get("name"))))
-                al = tr.get("album") or tr.get("al") or {}
-                al_name = al.get("name", "") if isinstance(al, dict) else ""
-                self.table.setItem(i, 3, QTableWidgetItem(al_name))
-                track_id = tr.get("encId") or tr.get("id", "")
-                self.table.setItem(i, 4, QTableWidgetItem(str(track_id)))
-                add_time = (tr.get("extMap") or {}).get("addTime", 0) or tr.get("_addTime", 0)
-                if add_time:
-                    dt = datetime.datetime.fromtimestamp(add_time / 1000)
-                    self.table.setItem(i, 5, QTableWidgetItem(dt.strftime("%Y-%m-%d %H:%M")))
-                else:
-                    self.table.setItem(i, 5, QTableWidgetItem("-"))
-                pt = tr.get("publishTime", 0)
-                if pt and pt > 0:
-                    pub_dt = datetime.datetime.fromtimestamp(pt / 1000)
-                    self.table.setItem(i, 6, QTableWidgetItem(pub_dt.strftime("%Y-%m-%d")))
-                else:
-                    self.table.setItem(i, 6, QTableWidgetItem("-"))
-            self.table.resizeRowsToContents()
+            self._fill_table(tracks)
             self.export_btn.setEnabled(shown > 0)
             self.reload_btn.setEnabled(True)
             pl_total = getattr(self, '_pl_total_tracks', 0) or 0
@@ -413,6 +433,7 @@ class MainWindow(QMainWindow):
                 self.status_lbl.setStyleSheet("color:#e55;")
             elif total > shown:
                 self.status_lbl.setText(f"显示 {shown}/{total} 首（歌单共 {total} 首）")
+                self.status_lbl.setStyleSheet("")
             else:
                 self.status_lbl.setText(f"共 {shown} 首")
                 self.status_lbl.setStyleSheet("")
@@ -422,7 +443,6 @@ class MainWindow(QMainWindow):
             self.status_lbl.setText(f"显示错误: {e}")
 
     def import_custom_order(self):
-        from PyQt6.QtWidgets import QFileDialog
         path, _ = QFileDialog.getOpenFileName(
             self, "导入歌曲名单", "",
             "文本文件 (*.txt *.csv);;所有文件 (*.*)"
@@ -466,6 +486,11 @@ class MainWindow(QMainWindow):
             reverse = (asc_cb.currentIndex() == 1)
             levels.append((field, reverse))
 
+        # 按「专辑发行时间」排序时才按需加载（避免每首歌单都逐张专辑请求）
+        if any(field == "专辑发行时间" for field, _ in levels):
+            if self._ensure_publish_time():
+                return
+
         ordered = sort_multi_level(
             self.current_tracks,
             levels,
@@ -476,32 +501,69 @@ class MainWindow(QMainWindow):
         self._show_sorted_tracks(ordered)
         self.apply_btn.setEnabled(True)
 
+    def _missing_publish_time_albums(self) -> int:
+        """统计还没加载发行时间的专辑数量"""
+        albums = set()
+        for tr in self.current_tracks:
+            if tr.get("publishTime"):
+                continue
+            al = tr.get("album") or tr.get("al") or {}
+            aid = al.get("id") if isinstance(al, dict) else ""
+            if aid:
+                albums.add(str(aid))
+        return len(albums)
+
+    def _ensure_publish_time(self) -> bool:
+        """按需加载专辑发行时间；返回 True 表示已开始在后台加载（本次预览中止）"""
+        if getattr(self, "_pt_loading", False):
+            return True
+        album_count = self._missing_publish_time_albums()
+        if album_count <= 0:
+            return False
+
+        reply = QMessageBox.question(
+            self, "需要加载发行时间",
+            f"还有 {album_count} 张专辑的发行时间未加载。\n"
+            f"加载需要逐张专辑请求，首次会比较慢（之后会缓存，无需重复加载）。\n\n"
+            f"是否现在加载并继续排序？（选择「否」则发行时间显示为 -）",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return False
+
+        self._pt_loading = True
+        self.apply_btn.setEnabled(False)
+        self.album_progress.setVisible(True)
+        self.album_progress.setMaximum(0)
+        self.status_lbl.setText("正在加载专辑发行时间...")
+
+        def _progress(cur, total):
+            def _do():
+                self.album_progress.setVisible(True)
+                self.album_progress.setMaximum(max(total, 1))
+                self.album_progress.setValue(cur)
+                self.status_lbl.setText(f"加载专辑发行时间 {cur}/{total}")
+            post(_do)
+
+        def _bg():
+            try:
+                ncm_fill_publish_time(self.current_tracks, _progress)
+            except Exception as e:
+                _log(f"[_ensure_publish_time] failed: {e}")
+
+            def _done():
+                self._pt_loading = False
+                self.album_progress.setVisible(False)
+                self.status_lbl.setText("发行时间加载完成")
+                self.preview()
+            post(_done)
+
+        threading.Thread(target=_bg, daemon=True).start()
+        return True
+
     def _show_sorted_tracks(self, tracks):
         try:
-            self.table.setRowCount(len(tracks))
-            for i, tr in enumerate(tracks):
-                self.table.setItem(i, 0, QTableWidgetItem(str(i + 1)))
-                self.table.setItem(i, 1, QTableWidgetItem(str(tr.get("name", ""))))
-                ar = tr.get("fullArtists") or tr.get("artists") or tr.get("ar") or []
-                self.table.setItem(i, 2, QTableWidgetItem("/".join(a.get("name", "") for a in ar if a.get("name"))))
-                al = tr.get("album") or tr.get("al") or {}
-                al_name = al.get("name", "") if isinstance(al, dict) else ""
-                self.table.setItem(i, 3, QTableWidgetItem(al_name))
-                track_id = tr.get("encId") or tr.get("id", "")
-                self.table.setItem(i, 4, QTableWidgetItem(str(track_id)))
-                add_time = (tr.get("extMap") or {}).get("addTime", 0) or tr.get("_addTime", 0)
-                if add_time:
-                    dt = datetime.datetime.fromtimestamp(add_time / 1000)
-                    self.table.setItem(i, 5, QTableWidgetItem(dt.strftime("%Y-%m-%d %H:%M")))
-                else:
-                    self.table.setItem(i, 5, QTableWidgetItem("-"))
-                pt = tr.get("publishTime", 0)
-                if pt and pt > 0:
-                    pub_dt = datetime.datetime.fromtimestamp(pt / 1000)
-                    self.table.setItem(i, 6, QTableWidgetItem(pub_dt.strftime("%Y-%m-%d")))
-                else:
-                    self.table.setItem(i, 6, QTableWidgetItem("-"))
-            self.table.resizeRowsToContents()
+            self._fill_table(tracks)
             self.status_lbl.setText(f"共 {len(tracks)} 首（预览模式）")
         except Exception as e:
             _log(f"[_show_sorted_tracks] EXCEPTION: {e}")
@@ -541,8 +603,6 @@ class MainWindow(QMainWindow):
             threading.Thread(target=self._bg_create_and_fill, args=(enc_ids,), daemon=True).start()
         else:
             # 小歌单：让用户选择方式
-            from PyQt6.QtWidgets import QDialog
-            from PyQt6.QtCore import Qt
             dlg = QDialog(self)
             dlg.setWindowTitle("选择排序方式")
             dlg.setMinimumWidth(400)
@@ -580,14 +640,14 @@ class MainWindow(QMainWindow):
         if new_name is None:
             new_name = f"{getattr(self, 'current_pl_name', '歌单')}-排序版"
         result = ncm_create_and_fill_playlist(new_name, enc_ids)
-        _log(f"[_bg_create_and_fill] done, calling _do_update_ui")
-        self._do_update_ui_new_playlist(result, enc_ids, new_name)
+        _log("[_bg_create_and_fill] done, posting UI update")
+        post(self._do_update_ui_new_playlist, result, enc_ids, new_name)
 
     def _bg_reorder(self, enc_ids):
-        _log(f"[_bg_reorder] started")
+        _log("[_bg_reorder] started")
         result = ncm_reorder(self.current_pl_enc_id, enc_ids)
-        _log(f"[_bg_reorder] done, calling _do_update_ui")
-        self._do_update_ui(result, enc_ids)
+        _log("[_bg_reorder] done, posting UI update")
+        post(self._do_update_ui, result, enc_ids)
 
     def _do_update_ui(self, result, enc_ids):
         _log(f"[_do_update_ui] called, result={result}")
@@ -639,7 +699,6 @@ class MainWindow(QMainWindow):
         rows = self.table.rowCount()
         if rows == 0:
             return
-        from PyQt6.QtWidgets import QFileDialog, QMessageBox
         default_name = "playlist.xlsx"
         if self.playlist_list.currentItem():
             default_name = self.playlist_list.currentItem().text().split("(")[0].strip() + ".xlsx"
@@ -655,7 +714,6 @@ class MainWindow(QMainWindow):
 
     def import_playlist(self):
         """从 Excel 表格导入歌曲顺序（用于自定义排序）"""
-        from PyQt6.QtWidgets import QFileDialog, QMessageBox
         if not self.current_tracks:
             QMessageBox.information(self, "提示", "请先加载歌单歌曲")
             return
@@ -692,177 +750,30 @@ class MainWindow(QMainWindow):
         self.status_lbl.setText(f"已复制 {len(ids)} 个歌曲 ID 到剪贴板")
         QMessageBox.information(self, "已复制", f"已复制 {len(ids)} 个歌曲 ID 到剪贴板")
 
-    def _show_search_artists_dialog(self):
-        if not self.playlists:
-            QMessageBox.information(self, "提示", "请先加载歌单")
-            return
-        dlg = SearchArtistsDialog(self.playlists, self)
+    def _show_search_dialog(self):
+        dlg = SearchDialog(self.playlists, self)
         dlg.exec()
         if dlg.result_playlist_id:
             QTimer.singleShot(300, self.load_playlists)
 
-
-class SearchArtistsDialog(QDialog):
-    def __init__(self, playlists, parent=None):
-        super().__init__(parent)
-        self.playlists = playlists
-        self.result_playlist_id = None
-        self._setup_ui()
-
-    def _setup_ui(self):
-        self.setWindowTitle("多歌单歌手搜索创建歌单")
-        self.setMinimumSize(600, 500)
-
-        layout = QVBoxLayout(self)
-
-        layout.addWidget(QLabel("选择要搜索的歌单（可多选）："))
-        self.playlist_cbs = []
-        self.playlist_cb_container = QVBoxLayout()
-        for p in self.playlists:
-            name = p.get("name", "?")
-            count = p.get("trackCount", 0) or 0
-            cb = QChkBx(f"{name}  ({count}首)")
-            cb.setChecked(False)
-            self.playlist_cbs.append(cb)
-            self.playlist_cb_container.addWidget(cb)
-        scroll_container = QWidget()
-        scroll_container.setLayout(self.playlist_cb_container)
-        scroll = QScrollArea()
-        scroll.setWidget(scroll_container)
-        scroll.setWidgetResizable(True)
-        scroll.setMaximumHeight(150)
-        layout.addWidget(scroll)
-
-        layout.addWidget(QLabel("歌手名（每行一个，支持模糊匹配）："))
-        self.artist_text = QTextEdit()
-        self.artist_text.setPlaceholderText("周杰伦\n林俊杰\n五月天")
-        self.artist_text.setMaximumHeight(120)
-        self.artist_text.setAcceptRichText(False)
-        self.artist_text.setTextColor(QColor("#ffffff"))
-        self.artist_text.setTextBackgroundColor(QColor("#1a1a1a"))
-        self.artist_text.setStyleSheet("""
-            QTextEdit {
-                background: #1a1a1a;
-                border: 1px solid #444444;
-            }
-        """)
-        layout.addWidget(self.artist_text)
-
-        layout.addWidget(QLabel("新歌单名称："))
-        self.name_edit = QLineEdit()
-        self.name_edit.setPlaceholderText("歌手精选集")
-        layout.addWidget(self.name_edit)
-
-        self.progress_lbl = QLabel("")
-        self.progress_lbl.setStyleSheet("color:#666; font-size:12px;")
-        layout.addWidget(self.progress_lbl)
-
-        self.progress_bar = QProgressBar()
-        self.progress_bar.setFixedHeight(8)
-        self.progress_bar.setTextVisible(False)
-        self.progress_bar.setStyleSheet("QProgressBar { border: none; background: #e0e0e0; border-radius: 4px; } QProgressBar::chunk { background: #1db100; border-radius: 4px; }")
-        self.progress_bar.setVisible(False)
-        layout.addWidget(self.progress_bar)
-
-        btns = QHBoxLayout()
-        btns.addStretch()
-        self.cancel_btn = QPushButton("取消")
-        self.cancel_btn.clicked.connect(self.reject)
-        btns.addWidget(self.cancel_btn)
-
-        self.confirm_btn = QPushButton("搜索并创建歌单")
-        self.confirm_btn.setStyleSheet("background:#1db100; color:white; font-weight:bold; padding:6px 20px;")
-        self.confirm_btn.clicked.connect(self._do_search)
-        btns.addWidget(self.confirm_btn)
-        layout.addLayout(btns)
-
-    def _do_search(self):
-        selected_pls = []
-        for i, cb in enumerate(self.playlist_cbs):
-            if cb.isChecked() and i < len(self.playlists):
-                selected_pls.append(self.playlists[i])
-
-        if not selected_pls:
-            QMessageBox.warning(self, "提示", "请至少选择一个歌单")
+    def _show_ai_sort_dialog(self):
+        if not self.current_tracks:
+            QMessageBox.information(self, "提示", "请先加载歌单")
             return
+        dlg = AISortDialog(self.current_tracks, self)
+        dlg.exec()
+        if dlg.sorted_enc_ids:
+            self._apply_ai_sort_result(dlg.sorted_enc_ids)
 
-        artist_text = self.artist_text.toPlainText().strip()
-        if not artist_text:
-            QMessageBox.warning(self, "提示", "请输入至少一个歌手名")
-            return
-        artist_names = [a.strip() for a in artist_text.split("\n") if a.strip()]
-        if not artist_names:
-            QMessageBox.warning(self, "提示", "请输入至少一个歌手名")
-            return
+    def _apply_ai_sort_result(self, sorted_enc_ids):
+        """应用 AI 排序结果到表格"""
+        enc_to_tr = {tr.get("encId"): tr for tr in self.current_tracks if tr.get("encId")}
+        ordered = [enc_to_tr[eid] for eid in sorted_enc_ids if eid in enc_to_tr]
+        if ordered:
+            self._sorted_tracks = ordered
+            self._show_sorted_tracks(ordered)
+            self.apply_btn.setEnabled(True)
+            self.status_lbl.setText(f"AI 排序完成，共 {len(ordered)} 首")
+        else:
+            QMessageBox.warning(self, "提示", "排序结果无效")
 
-        new_name = self.name_edit.text().strip()
-        if not new_name:
-            QMessageBox.warning(self, "提示", "请输入新歌单名称")
-            return
-
-        self.confirm_btn.setEnabled(False)
-        self.cancel_btn.setEnabled(False)
-        self.progress_bar.setVisible(True)
-        self.progress_lbl.setText("正在搜索...")
-
-        playlist_enc_ids = [p.get("id", "") for p in selected_pls]
-
-        def _bg():
-            try:
-                enc_ids, tracks = ncm_search_artists_in_playlists(
-                    playlist_enc_ids, artist_names, None
-                )
-            except Exception as e:
-                _log(f"[_bg] search exception: {e}")
-                QTimer.singleShot(0, lambda: (
-                    self.progress_bar.setVisible(False),
-                    self.progress_lbl.setText(""),
-                    QMessageBox.warning(self, "错误", f"搜索失败: {e}"),
-                    self.confirm_btn.setEnabled(True),
-                    self.cancel_btn.setEnabled(True),
-                ))
-                return
-
-            self.progress_lbl.setText(f"搜索完成，找到 {len(enc_ids)} 首，正在创建歌单...")
-            self.progress_bar.setVisible(False)
-
-            if not enc_ids:
-                QTimer.singleShot(0, lambda: (
-                    self.progress_lbl.setText(""),
-                    QMessageBox.information(self, "提示", "未找到匹配歌手的歌曲"),
-                    self.confirm_btn.setEnabled(True),
-                    self.cancel_btn.setEnabled(True),
-                ))
-                return
-
-            try:
-                result = ncm_create_and_fill_playlist(new_name, enc_ids, None)
-            except Exception as e:
-                _log(f"[_bg] create exception: {e}")
-                QTimer.singleShot(0, lambda: (
-                    self.progress_lbl.setText(""),
-                    QMessageBox.warning(self, "错误", f"创建歌单失败: {e}"),
-                    self.confirm_btn.setEnabled(True),
-                    self.cancel_btn.setEnabled(True),
-                ))
-                return
-
-            def _done():
-                self.progress_lbl.setText("")
-                if result and result.get("code") == 200:
-                    new_pl_id = result.get("data", {}).get("id", "")
-                    track_count = result.get("data", {}).get("trackCount", len(enc_ids))
-                    self.result_playlist_id = new_pl_id
-                    self.progress_lbl.setText(f"✅ 创建成功！共 {track_count} 首，歌单ID：{new_pl_id}")
-                    self.confirm_btn.setText("关闭")
-                    self.confirm_btn.clicked.disconnect()
-                    self.confirm_btn.clicked.connect(self.accept)
-                else:
-                    msg_err = result.get("message", "未知错误") if result else "创建失败"
-                    self.progress_lbl.setText(f"❌ 创建失败：{msg_err}")
-                    self.confirm_btn.setEnabled(True)
-                    self.cancel_btn.setEnabled(True)
-
-            _done()
-
-        threading.Thread(target=_bg, daemon=True).start()

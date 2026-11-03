@@ -2,9 +2,44 @@
 import json
 import os
 import subprocess
+import tempfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from logger import _log
+from utils.match import (
+    FIELD_ARTIST, normalize_keywords, track_matches,
+)
+
+# 专辑发行时间缓存：专辑发行时间不会变，持久化后可跳过大量 album get 调用
+_ALBUM_PT_CACHE_FILE = os.path.join(tempfile.gettempdir(), "ncm_album_publish_cache.json")
+_album_pt_cache: dict[str, int] | None = None
+
+
+def _load_album_pt_cache() -> dict[str, int]:
+    """加载专辑发行时间缓存（内存一次读盘，失败静默降级为空缓存）"""
+    global _album_pt_cache
+    if _album_pt_cache is None:
+        try:
+            with open(_ALBUM_PT_CACHE_FILE, "r", encoding="utf-8") as f:
+                raw = json.load(f)
+            _album_pt_cache = {str(k): int(v) for k, v in raw.items() if v}
+            _log(f"[album_pt_cache] loaded {len(_album_pt_cache)} entries")
+        except Exception:
+            _album_pt_cache = {}
+    return _album_pt_cache
+
+
+def _save_album_pt_cache() -> None:
+    """原子写入缓存文件"""
+    if _album_pt_cache is None:
+        return
+    try:
+        tmp = _ALBUM_PT_CACHE_FILE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(_album_pt_cache, f, ensure_ascii=False)
+        os.replace(tmp, _ALBUM_PT_CACHE_FILE)
+    except Exception as e:
+        _log(f"[album_pt_cache] save failed: {e}")
 
 def _get_storage_state_path() -> str:
     config_dir = os.path.join(os.path.expanduser("~"), ".config", "ncm-cli")
@@ -245,19 +280,41 @@ def ncm_get_tracks(playlist_enc_id: str, progress_callback=None, load_publish_ti
             break
         offset += 500
 
-    # 补充 publishTime（可选）
-    album_ids_seen = {}
     if load_publish_time:
+        ncm_fill_publish_time(all_tracks, progress_callback)
+    else:
         for t in all_tracks:
-            al = t.get("album") or t.get("al")
-            if isinstance(al, dict):
-                al_enc = al.get("id") or al.get("originalId")
-                if al_enc:
-                    album_ids_seen[al_enc] = None
+            t.setdefault("publishTime", 0)
 
-        if album_ids_seen:
-            _log(f"[ncm_get_tracks] fetching publishTime for {len(album_ids_seen)} unique albums via album get")
+    enc_ids = [t["id"] for t in all_tracks]
+    return enc_ids, all_tracks
 
+
+def ncm_fill_publish_time(tracks: list[dict], progress_callback=None) -> int:
+    """为 tracks 原地补齐专辑发行时间（publishTime，毫秒）
+
+    专辑发行时间不会变化，全部落盘缓存；重复加载同一批专辑几乎不产生请求。
+    返回本次新获取的专辑数量。
+    """
+    album_pt: dict[str, int] = {}
+    album_ids: dict[str, None] = {}
+    for t in tracks:
+        al = t.get("album") or t.get("al")
+        if isinstance(al, dict):
+            al_enc = al.get("id") or al.get("originalId")
+            if al_enc:
+                album_ids[str(al_enc)] = None
+
+    fetched = 0
+    if album_ids:
+        cache = _load_album_pt_cache()
+        total_albums = len(album_ids)
+        cached = {k: cache[k] for k in album_ids if k in cache}
+        album_pt.update(cached)
+        missing = [k for k in album_ids if k not in cache]
+        _log(f"[ncm_fill_publish_time] {len(cached)} cached / {len(missing)} to fetch")
+
+        if missing:
             def _fetch_album(al_enc):
                 rc_al, out_al, _ = run_ncm_global([
                     "album", "get", "--albumId", str(al_enc), "--output", "json"
@@ -269,29 +326,36 @@ def ncm_get_tracks(playlist_enc_id: str, progress_callback=None, load_publish_ti
                         pt = parsed_al.get("data", {}).get("publishTime") or 0
                 return al_enc, pt
 
-            fetched_count = 0
-            with ThreadPoolExecutor(max_workers=3) as executor:
-                futures = {executor.submit(_fetch_album, al_enc): al_enc for al_enc in album_ids_seen}
+            done = len(cached)
+            if progress_callback and cached:
+                progress_callback(done, total_albums)
+            with ThreadPoolExecutor(max_workers=4) as executor:
+                futures = {executor.submit(_fetch_album, al_enc): al_enc for al_enc in missing}
                 for future in as_completed(futures):
-                    al_enc, pt = future.result()
-                    album_ids_seen[al_enc] = pt
-                    fetched_count += 1
+                    try:
+                        al_enc, pt = future.result()
+                    except Exception as e:
+                        _log(f"[ncm_fill_publish_time] album get exception: {e}")
+                        continue
+                    if pt:
+                        album_pt[al_enc] = pt
+                        cache[al_enc] = pt
+                        fetched += 1
+                    done += 1
                     if progress_callback:
-                        progress_callback(fetched_count, len(album_ids_seen))
-            _log(f"[ncm_get_tracks] album publishTime results: {dict((k, v) for k, v in album_ids_seen.items())}")
+                        progress_callback(done, total_albums)
+            _save_album_pt_cache()
+            _log(f"[ncm_fill_publish_time] fetched {fetched} album publishTime, cache={len(cache)}")
 
-    # 把 publishTime 注入每条 track
-    for t in all_tracks:
+    for t in tracks:
         al = t.get("album") or t.get("al")
         pt = 0
-        if load_publish_time and isinstance(al, dict):
+        if isinstance(al, dict):
             al_enc = al.get("id") or al.get("originalId")
-            if al_enc and al_enc in album_ids_seen:
-                pt = album_ids_seen[al_enc] or 0
+            if al_enc:
+                pt = album_pt.get(str(al_enc), 0) or 0
         t["publishTime"] = pt
-
-    enc_ids = [t["id"] for t in all_tracks]
-    return enc_ids, all_tracks
+    return fetched
 
 
 def _do_reorder(playlist_enc_id: str, track_ids: list[str]) -> dict | None:
@@ -322,7 +386,7 @@ def _do_reorder(playlist_enc_id: str, track_ids: list[str]) -> dict | None:
         _log(f"[_do_reorder] returned code={code}, data={data}")
         result["code"] = code if code else -1
         return result
-    _log(f"[_do_reorder] success, code=200")
+    _log("[_do_reorder] success, code=200")
     return {"code": 200, "data": True}
 
 
@@ -479,7 +543,6 @@ def ncm_create_and_fill_playlist(playlist_name: str, track_ids: list[str], progr
     # 倒序处理批次 + 每批内部反转
     for bi in range(len(batches) - 1, -1, -1):
         batch = batches[bi]
-        batch_num = bi + 1
         # 每批内部反转
         reversed_batch = list(reversed(batch))
         track_ids_json = json.dumps(reversed_batch)
@@ -520,75 +583,170 @@ def ncm_create_and_fill_playlist(playlist_name: str, track_ids: list[str], progr
     }
 
 
+def ncm_search_tracks_in_playlists(
+    playlist_enc_ids: list[str],
+    keywords: list[str],
+    fields: list[str] | tuple[str, ...] = ("artist", "album", "song"),
+    exclude_keywords: list[str] | None = None,
+    progress_callback=None,
+    load_publish_time: bool = False,
+) -> tuple[list[str], list[dict]]:
+    """在多个歌单中按关键词（歌手/专辑/歌名）筛选歌曲并去重
+
+    每个歌单只请求一次（旧实现为了估算进度会把所有歌单抓两遍）。
+
+    Args:
+        playlist_enc_ids: 歌单加密ID列表
+        keywords: 关键词列表（包含即匹配，会自动归一化）
+        fields: 匹配字段，可选 "artist" / "album" / "song"
+        exclude_keywords: 排除关键词
+        progress_callback: 回调 (current_playlist, total_playlists, status_msg)
+        load_publish_time: 是否顺带加载专辑发行时间（筛选一般不需要）
+
+    Returns:
+        (enc_ids列表, tracks_info列表)
+    """
+    include = normalize_keywords(keywords)
+    exclude = normalize_keywords(exclude_keywords or [])
+    fields = list(fields) or ["artist"]
+    total_pls = len(playlist_enc_ids)
+    _log(f"[ncm_search_tracks_in_playlists] keywords={include}, exclude={exclude}, "
+         f"fields={fields}, playlists={total_pls}")
+
+    if not include:
+        return [], []
+
+    seen: set[str] = set()
+    result_tracks: list[dict] = []
+
+    for idx, pl_enc_id in enumerate(playlist_enc_ids):
+        if progress_callback:
+            progress_callback(idx, total_pls,
+                              f"正在加载第 {idx + 1}/{total_pls} 个歌单（已匹配 {len(result_tracks)} 首）...")
+        _, tracks = ncm_get_tracks(
+            pl_enc_id, progress_callback=None, load_publish_time=load_publish_time
+        )
+        for track in tracks:
+            if not track_matches(track, include, exclude, fields):
+                continue
+            enc_id = track.get("id") or track.get("encId")
+            if enc_id and enc_id not in seen:
+                seen.add(enc_id)
+                result_tracks.append(track)
+        _log(f"[ncm_search_tracks_in_playlists] playlist {idx + 1}/{total_pls}: "
+             f"{len(tracks)} tracks, total matched={len(result_tracks)}")
+
+    if progress_callback:
+        progress_callback(total_pls, total_pls,
+                          f"搜索完成，共匹配 {len(result_tracks)} 首")
+
+    _log(f"[ncm_search_tracks_in_playlists] found {len(result_tracks)} unique tracks")
+    enc_ids_result = [t.get("id") or t.get("encId") for t in result_tracks]
+    return enc_ids_result, result_tracks
+
+
 def ncm_search_artists_in_playlists(
     playlist_enc_ids: list[str],
     artist_names: list[str],
     progress_callback=None
 ) -> tuple[list[str], list[dict]]:
-    """
-    在多个歌单中搜索多个歌手的歌曲并去重
+    """兼容旧接口：只按歌手名筛选"""
+    return ncm_search_tracks_in_playlists(
+        playlist_enc_ids, artist_names, fields=(FIELD_ARTIST,),
+        progress_callback=progress_callback,
+    )
+
+
+def ncm_search_albums(keyword: str, limit: int = 100, offset: int = 0) -> list[dict]:
+    """在线搜索专辑（走 ncm-cli search album）"""
+    _log(f"[ncm_search_albums] keyword={keyword}, limit={limit}, offset={offset}")
+    rc, out, err = run_ncm_global([
+        "search", "album",
+        "--keyword", keyword,
+        "--limit", str(limit),
+        "--offset", str(offset),
+        "--output", "json",
+    ])
+    if rc != 0:
+        _log(f"[ncm_search_albums] rc={rc}, err={err[:300]}")
+        return []
+    parsed = _parse_json_output(out)
+    if not parsed or parsed.get("code") != 200:
+        _log(f"[ncm_search_albums] bad response: {out[:200]}")
+        return []
+    data = parsed.get("data") or {}
+    records = data.get("records") or []
+    _log(f"[ncm_search_albums] got {len(records)} albums (recordCount={data.get('recordCount')})")
+    return records
+
+
+def ncm_get_album_tracks(album_enc_id: str) -> list[dict]:
+    """获取某个专辑的全部歌曲"""
+    rc, out, err = run_ncm_global([
+        "album", "tracks",
+        "--albumId", str(album_enc_id),
+        "--output", "json",
+    ])
+    if rc != 0:
+        _log(f"[ncm_get_album_tracks] rc={rc} albumId={album_enc_id}, err={err[:200]}")
+        return []
+    parsed = _parse_json_output(out)
+    if not parsed or parsed.get("code") != 200:
+        _log(f"[ncm_get_album_tracks] bad response for {album_enc_id}: {out[:200]}")
+        return []
+    data = parsed.get("data")
+    return data if isinstance(data, list) else []
+
+
+def ncm_collect_album_tracks(
+    albums: list[dict],
+    progress_callback=None,
+    max_workers: int = 3,
+) -> tuple[list[str], list[dict]]:
+    """批量拉取多个专辑的全部歌曲并按专辑顺序去重合并
 
     Args:
-        playlist_enc_ids: 歌单加密ID列表
-        artist_names: 歌手名列表（模糊匹配，包含即匹配）
-        progress_callback: 回调 (current, total, status_msg)
+        albums: [{"id": 专辑加密ID, "name": 专辑名, ...}, ...]
+        progress_callback: 回调 (done, total, status_msg)
 
     Returns:
-        (enc_ids列表, tracks_info列表)
+        (enc_ids列表, tracks列表)
     """
-    _log(f"[ncm_search_artists_in_playlists] searching {len(artist_names)} artists in {len(playlist_enc_ids)} playlists")
+    albums = [a for a in albums if a.get("id")]
+    total = len(albums)
+    _log(f"[ncm_collect_album_tracks] collecting {total} albums")
 
-    seen_enc_ids: set[str] = set()
-    result_tracks: list[dict] = []
+    album_tracks: dict[str, list[dict]] = {}
+    if total:
+        done = 0
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {
+                executor.submit(ncm_get_album_tracks, a["id"]): a for a in albums
+            }
+            for future in as_completed(futures):
+                album = futures[future]
+                try:
+                    tracks = future.result() or []
+                except Exception as e:
+                    _log(f"[ncm_collect_album_tracks] album {album.get('id')} failed: {e}")
+                    tracks = []
+                album_tracks[album["id"]] = tracks
+                done += 1
+                if progress_callback:
+                    progress_callback(
+                        done, total,
+                        f"正在获取专辑歌曲 {done}/{total}：{album.get('name', '')}",
+                    )
 
-    total_pls = len(playlist_enc_ids)
+    seen: set[str] = set()
+    result: list[dict] = []
+    for album in albums:
+        for track in album_tracks.get(album["id"], []):
+            enc_id = track.get("id") or track.get("encId")
+            if enc_id and enc_id not in seen:
+                seen.add(enc_id)
+                result.append(track)
 
-    # 第一阶段：获取所有歌单的歌曲数量，用于进度预估
-    pl_track_counts: list[int] = []
-    for idx, pl_enc_id in enumerate(playlist_enc_ids):
-        if progress_callback:
-            progress_callback(idx + 1, total_pls, f"正在加载歌单... {idx + 1}/{total_pls}")
-        _, tracks = ncm_get_tracks(pl_enc_id, progress_callback=None, load_publish_time=False)
-        pl_track_counts.append(len(tracks))
-
-    total_tracks_est = sum(pl_track_counts)
-    _log(f"[ncm_search_artists_in_playlists] total tracks estimate: {total_tracks_est}")
-
-    processed = 0
-    for idx, (pl_enc_id, track_count) in enumerate(zip(playlist_enc_ids, pl_track_counts)):
-        enc_ids, tracks = ncm_get_tracks(pl_enc_id, progress_callback=None, load_publish_time=False)
-
-        for track in tracks:
-            processed += 1
-            if progress_callback:
-                progress_callback(processed, total_tracks_est, f"正在搜索第 {idx + 1}/{total_pls} 个歌单，已匹配 {len(result_tracks)} 首...")
-
-            artists = track.get("ar") or track.get("artists") or []
-            if not artists:
-                continue
-
-            matched = False
-            for artist in artists:
-                artist_name = artist.get("name", "")
-                if not artist_name:
-                    continue
-                for search_name in artist_names:
-                    if search_name.strip() and search_name.strip() in artist_name:
-                        matched = True
-                        break
-                if matched:
-                    break
-
-            if matched:
-                enc_id = track.get("id") or track.get("encId")
-                if enc_id and enc_id not in seen_enc_ids:
-                    seen_enc_ids.add(enc_id)
-                    result_tracks.append(track)
-
-    # 搜索完成后发最终进度
-    if progress_callback:
-        progress_callback(total_tracks_est, total_tracks_est, f"搜索完成，已匹配 {len(result_tracks)} 首，正在创建歌单...")
-
-    _log(f"[ncm_search_artists_in_playlists] found {len(result_tracks)} unique tracks")
-    enc_ids_result = [t.get("id") or t.get("encId") for t in result_tracks]
-    return enc_ids_result, result_tracks
+    _log(f"[ncm_collect_album_tracks] collected {len(result)} unique tracks from {total} albums")
+    enc_ids = [t.get("id") or t.get("encId") for t in result]
+    return enc_ids, result
