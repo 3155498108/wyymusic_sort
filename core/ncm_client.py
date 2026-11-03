@@ -2,6 +2,7 @@
 import json
 import os
 import subprocess
+import sys
 import tempfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -131,19 +132,43 @@ def _find_npm() -> str:
 
 
 def _get_bundled_ncm_cli() -> str | None:
-    """查找打包目录内的 ncm-cli.exe"""
-    # PyInstaller 打包后的临时目录
-    if hasattr(os, '_MEIPASS'):
-        bundled = os.path.join(os._MEIPASS, 'ncm-cli.exe')
-        if os.path.exists(bundled):
-            return bundled
-    # 回退到 exe 所在目录
-    exe_dir = os.path.dirname(os.path.abspath(__file__))
-    parent_dir = os.path.dirname(exe_dir)
-    bundled = os.path.join(parent_dir, 'ncm-cli.exe')
-    if os.path.exists(bundled):
-        return bundled
+    """查找随包分发的 ncm-cli.exe
+
+    打包（PyInstaller onedir）后模块位于 _internal 下，
+    所以既要在 _MEIPASS 里找，也要在 exe 同级目录 / exe 同级的 _internal 里找，
+    否则会误判为"没有自带 ncm-cli"而回退到系统 npm（没装 Node.js 的机器就跑不起来）。
+    """
+    candidates: list[str] = []
+    meipass = getattr(sys, "_MEIPASS", None)
+    if meipass:
+        candidates.append(os.path.join(meipass, "ncm-cli.exe"))
+    if getattr(sys, "frozen", False):
+        exe_dir = os.path.dirname(os.path.abspath(sys.executable))
+        candidates.append(os.path.join(exe_dir, "ncm-cli.exe"))
+        candidates.append(os.path.join(exe_dir, "_internal", "ncm-cli.exe"))
+    # 源码运行时的回退：项目根目录
+    here = os.path.dirname(os.path.abspath(__file__))
+    candidates.append(os.path.join(os.path.dirname(here), "ncm-cli.exe"))
+
+    for path in candidates:
+        if os.path.exists(path):
+            return path
     return None
+
+
+def _ncm_env(include_xdg: bool = True) -> dict:
+    """ncm-cli 子进程环境变量
+
+    必须保留系统环境：缺 SYSTEMROOT 等变量时 Node 会报
+    「NetworkError: 网络连接异常」，所有接口直接失败。
+    """
+    env = dict(os.environ)
+    home = os.path.expanduser("~")
+    env["USERPROFILE"] = home
+    env["HOME"] = home
+    if include_xdg:
+        env["XDG_CONFIG_HOME"] = os.path.join(home, ".config")
+    return env
 
 
 def run_ncm(args: list[str], timeout: int = 60) -> tuple[int, str, str]:
@@ -152,11 +177,7 @@ def run_ncm(args: list[str], timeout: int = 60) -> tuple[int, str, str]:
     bundled = _get_bundled_ncm_cli()
     if bundled:
         _log(f"[run_ncm] using bundled ncm-cli: {bundled}")
-        env = {
-            "USERPROFILE": os.path.expanduser("~"),
-            "HOME": os.path.expanduser("~"),
-            "XDG_CONFIG_HOME": os.path.join(os.path.expanduser("~"), ".config"),
-        }
+        env = _ncm_env()
         cmd = [bundled] + args
         r = subprocess.run(cmd, capture_output=True, timeout=timeout, env=env,
                           creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
@@ -168,12 +189,7 @@ def run_ncm(args: list[str], timeout: int = 60) -> tuple[int, str, str]:
     if not npm or not os.path.exists(npm):
         return -1, "", ("错误：未找到 npm。请确保已安装 Node.js。\n"
                            "下载地址：https://nodejs.org/")
-    env = {
-        **os.environ,
-        "USERPROFILE": os.path.expanduser("~"),
-        "HOME": os.path.expanduser("~"),
-        "XDG_CONFIG_HOME": os.path.join(os.path.expanduser("~"), ".config"),
-    }
+    env = _ncm_env()
     cmd = [npm, "exec", "--global", "ncm-cli", "--"] + args
     _log(f"[run_ncm] cmd: {' '.join(cmd)}")
     r = subprocess.run(cmd, capture_output=True, timeout=timeout, env=env,
@@ -188,10 +204,7 @@ def run_ncm_global(args: list[str], timeout: int = 300) -> tuple[int, str, str]:
     bundled = _get_bundled_ncm_cli()
     if bundled:
         _log(f"[run_ncm_global] using bundled ncm-cli: {bundled}")
-        env = {
-            "USERPROFILE": os.path.expanduser("~"),
-            "HOME": os.path.expanduser("~"),
-        }
+        env = _ncm_env(include_xdg=False)
         cmd = [bundled] + args
         r = subprocess.run(cmd, capture_output=True, timeout=timeout, env=env,
                           creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
@@ -201,11 +214,7 @@ def run_ncm_global(args: list[str], timeout: int = 300) -> tuple[int, str, str]:
     if not npm or not os.path.exists(npm):
         return -1, "", ("错误：未找到 npm。请确保已安装 Node.js。\n"
                            "下载地址：https://nodejs.org/")
-    env = {
-        **os.environ,
-        "USERPROFILE": os.path.expanduser("~"),
-        "HOME": os.path.expanduser("~"),
-    }
+    env = _ncm_env(include_xdg=False)
     cmd = [npm, "exec", "--global", "ncm-cli", "--"] + args
     r = subprocess.run(cmd, capture_output=True, timeout=timeout, env=env,
                        creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
