@@ -6,7 +6,7 @@ import threading
 from PyQt6.QtWidgets import (QMainWindow, QWidget, QHBoxLayout, QVBoxLayout,
                              QListWidget, QTableWidget, QTableWidgetItem,
                              QPushButton, QComboBox, QLabel, QMessageBox, QHeaderView,
-                             QAbstractItemView, QGroupBox, QCheckBox,
+                             QAbstractItemView, QCheckBox,
                              QVBoxLayout as QVBL2, QProgressBar, QDialog,
                              QApplication, QFileDialog)
 from PyQt6.QtCore import QTimer, Qt

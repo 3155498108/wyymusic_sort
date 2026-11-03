@@ -57,7 +57,7 @@ class AISortDialog(QDialog):
         self.cancel_btn.clicked.connect(self.reject)
         btns.addWidget(self.cancel_btn)
 
-        self.start_btn = QPushButton("🤖 开始 AI 排序")
+        self.start_btn = QPushButton("开始排序")
         self.start_btn.setMinimumHeight(40)
         self.start_btn.setProperty("variant", "primary")
         self.start_btn.setCursor(Qt.CursorShape.PointingHandCursor)

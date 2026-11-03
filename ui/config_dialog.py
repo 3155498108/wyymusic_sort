@@ -2,7 +2,8 @@
 import json
 import os
 
-from PyQt6.QtWidgets import QDialog, QVBoxLayout, QLabel, QLineEdit, QPushButton, QMessageBox, QComboBox
+from PyQt6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit,
+                             QPushButton, QMessageBox, QComboBox)
 from PyQt6.QtCore import Qt
 
 from constants import CONFIG_FILE
@@ -13,7 +14,7 @@ class ConfigDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("配置")
-        self.setMinimumWidth(450)
+        self.setMinimumWidth(470)
         self.app_id = ""
         self.private_key = ""
         self.ai_provider = "openai"
@@ -27,62 +28,67 @@ class ConfigDialog(QDialog):
         self.setWindowFlags(Qt.WindowType.Window | Qt.WindowType.Dialog)
         self.setModal(True)
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(24, 20, 24, 16)
+        layout.setSpacing(8)
 
         # 网易云音乐配置
         api_lbl = QLabel("网易云音乐 API 凭据")
         api_lbl.setProperty("variant", "section")
         layout.addWidget(api_lbl)
-        layout.addSpacing(3)
 
-        layout.addWidget(QLabel("AppID："))
+        layout.addWidget(QLabel("AppID"))
         self.app_id_edit = QLineEdit()
         self.app_id_edit.setPlaceholderText("请输入 AppID")
         layout.addWidget(self.app_id_edit)
 
-        layout.addWidget(QLabel("PrivateKey："))
+        layout.addWidget(QLabel("PrivateKey"))
         self.private_key_edit = QLineEdit()
         self.private_key_edit.setPlaceholderText("请输入 PrivateKey")
         self.private_key_edit.setEchoMode(QLineEdit.EchoMode.Password)
         layout.addWidget(self.private_key_edit)
 
-        layout.addSpacing(15)
+        layout.addSpacing(14)
 
         # AI 配置
         ai_lbl = QLabel("AI 排序配置")
         ai_lbl.setProperty("variant", "section")
         layout.addWidget(ai_lbl)
-        layout.addSpacing(3)
 
-        layout.addWidget(QLabel("AI 提供商："))
+        layout.addWidget(QLabel("AI 提供商"))
         self.ai_provider_combo = QComboBox()
         self.ai_provider_combo.addItems(["OpenAI", "Anthropic Claude", "本地模型 (Ollama)"])
         self.ai_provider_combo.setCurrentIndex(0)
         layout.addWidget(self.ai_provider_combo)
 
-        layout.addWidget(QLabel("API Key："))
+        layout.addWidget(QLabel("API Key"))
         self.ai_api_key_edit = QLineEdit()
         self.ai_api_key_edit.setPlaceholderText("请输入 API Key")
         self.ai_api_key_edit.setEchoMode(QLineEdit.EchoMode.Password)
         layout.addWidget(self.ai_api_key_edit)
 
-        layout.addWidget(QLabel("模型（可选）："))
+        layout.addWidget(QLabel("模型（可选）"))
         self.ai_model_edit = QLineEdit()
         self.ai_model_edit.setPlaceholderText("如 gpt-4o-mini / claude-sonnet-4-20250514（留空使用默认）")
         layout.addWidget(self.ai_model_edit)
 
-        layout.addSpacing(15)
+        layout.addSpacing(16)
 
-        btns = QPushButton("保存")
-        btns.setMinimumHeight(40)
-        btns.setProperty("variant", "primary")
-        btns.clicked.connect(self._save)
-        layout.addWidget(btns)
-
+        btn_row = QHBoxLayout()
+        btn_row.addStretch()
         cancel_btn = QPushButton("取消")
+        cancel_btn.setMinimumWidth(84)
         cancel_btn.clicked.connect(self.reject)
-        layout.addWidget(cancel_btn)
+        btn_row.addWidget(cancel_btn)
 
-        self.note_lbl = QLabel("（配置文件保存在应用目录下）")
+        save_btn = QPushButton("保存")
+        save_btn.setMinimumWidth(96)
+        save_btn.setProperty("variant", "primary")
+        save_btn.setDefault(True)
+        save_btn.clicked.connect(self._save)
+        btn_row.addWidget(save_btn)
+        layout.addLayout(btn_row)
+
+        self.note_lbl = QLabel("配置文件保存在应用目录下")
         self.note_lbl.setProperty("variant", "weak")
         layout.addWidget(self.note_lbl)
 
