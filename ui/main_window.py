@@ -9,7 +9,7 @@ from PyQt6.QtWidgets import (QMainWindow, QWidget, QHBoxLayout, QVBoxLayout,
                              QAbstractItemView, QGroupBox, QCheckBox,
                              QVBoxLayout as QVBL2, QProgressBar, QDialog,
                              QApplication, QFileDialog)
-from PyQt6.QtCore import QTimer
+from PyQt6.QtCore import QTimer, Qt
 
 from logger import _log
 from constants import CONFIG_FILE
@@ -22,6 +22,7 @@ from ui.login_dialog import LoginDialog
 from ui.config_dialog import ConfigDialog
 from ui.ai_sort_dialog import AISortDialog
 from ui.search_dialog import SearchDialog
+from ui.theme import apply_dark_title_bar
 from ui.ui_thread import post
 from utils.sort import sort_multi_level, sort_by_custom_order
 from utils.excel import export_table_to_excel, import_tracks_from_excel
@@ -56,17 +57,24 @@ class MainWindow(QMainWindow):
         status = ncm_login_check()
         if status.get("success"):
             msg = status.get("message", "已登录")
-            self.status_lbl2.setText(f"✅ {msg}")
-            self.status_lbl2.setStyleSheet("color:#1db100; font-size:13px; font-weight:bold;")
-            self.login_btn.setText("🚪 退出登录")
-            self.login_btn.setStyleSheet("color:#e55; font-weight:bold;")
+            self.status_lbl2.setText(f"● {msg}")
+            self.status_lbl2.setStyleSheet("color:#4FC08D; font-size:12px;")
+            self.login_btn.setText("退出登录")
+            self.login_btn.setProperty("variant", "ghost")
             self.login_btn.setEnabled(True)
         else:
-            self.status_lbl2.setText("⚠ 未登录")
-            self.status_lbl2.setStyleSheet("color:#e55; font-size:13px; font-weight:bold;")
-            self.login_btn.setText("🔐 扫码登录")
-            self.login_btn.setStyleSheet("color:#1db100; font-weight:bold;")
+            self.status_lbl2.setText("○ 未登录")
+            self.status_lbl2.setStyleSheet("color:#E06C6C; font-size:12px;")
+            self.login_btn.setText("扫码登录")
+            self.login_btn.setProperty("variant", "primary")
             self.login_btn.setEnabled(True)
+        self._repolish(self.login_btn)
+
+    @staticmethod
+    def _repolish(widget):
+        """动态属性改变后重新应用样式"""
+        widget.style().unpolish(widget)
+        widget.style().polish(widget)
 
     def _show_login(self):
         result = ncm_login()
@@ -89,6 +97,9 @@ class MainWindow(QMainWindow):
             self._check_login()
             self.playlist_list.clear()
             self.table.setRowCount(0)
+            self.current_tracks = []
+            self.title_lbl.setText("未选择歌单")
+            self.sub_lbl.setText("从左侧选择一个歌单开始")
             self.status_lbl.setText("已退出登录")
         else:
             QMessageBox.warning(self, "错误", "退出登录失败")
@@ -100,159 +111,287 @@ class MainWindow(QMainWindow):
         else:
             self._show_login()
 
+    def _open_config(self):
+        dlg = ConfigDialog(self)
+        dlg.exec()
+
     def _setup_ui(self):
         self.setWindowTitle("网易云歌单排序器")
-        self.setGeometry(150, 80, 1200, 740)
+        self.setMinimumSize(1100, 680)
+        self.resize(1280, 800)
 
         central = QWidget()
+        central.setObjectName("central")
         self.setCentralWidget(central)
-        layout = QHBoxLayout(central)
+        root = QHBoxLayout(central)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
 
-        # ===== 左：歌单列表 =====
-        left = QVBoxLayout()
-        left.addWidget(QLabel("我的歌单"))
-        self.playlist_list = QListWidget()
-        self.playlist_list.setMaximumWidth(380)
-        self.playlist_list.currentRowChanged.connect(self._on_select)
-        left.addWidget(self.playlist_list)
+        root.addWidget(self._build_sidebar())
+        root.addWidget(self._build_content(), 1)
 
-        refresh_btn = QPushButton("刷新歌单")
+        apply_dark_title_bar(self)
+
+    def _build_sidebar(self) -> QWidget:
+        """左侧栏：品牌 + 我的歌单 + 文件操作 + 登录状态"""
+        side = QWidget()
+        side.setObjectName("sidebar")
+        side.setFixedWidth(238)
+        lay = QVBoxLayout(side)
+        lay.setContentsMargins(14, 18, 14, 14)
+        lay.setSpacing(10)
+
+        # 品牌
+        brand_row = QHBoxLayout()
+        brand_row.setSpacing(9)
+        logo = QLabel("♪")
+        logo.setObjectName("logo")
+        logo.setFixedSize(26, 26)
+        logo.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        brand_row.addWidget(logo)
+        brand = QLabel("网易云歌单排序器")
+        brand.setProperty("variant", "brand")
+        brand_row.addWidget(brand)
+        brand_row.addStretch()
+        lay.addLayout(brand_row)
+        lay.addSpacing(8)
+
+        # 我的歌单
+        title_row = QHBoxLayout()
+        title_row.setSpacing(2)
+        pl_title = QLabel("我的歌单")
+        pl_title.setProperty("variant", "section")
+        title_row.addWidget(pl_title)
+        title_row.addStretch()
+        refresh_btn = QPushButton("刷新")
+        refresh_btn.setToolTip("重新获取歌单列表")
+        refresh_btn.setProperty("variant", "ghost")
         refresh_btn.clicked.connect(self.load_playlists)
-        left.addWidget(refresh_btn)
-
-        self.reload_btn = QPushButton("🔄 重新加载")
-        self.reload_btn.setStyleSheet("color:#555; padding:4px 10px;")
+        self.reload_btn = QPushButton("重载")
+        self.reload_btn.setProperty("variant", "ghost")
+        self.reload_btn.setToolTip("重新加载当前歌单的歌曲")
         self.reload_btn.clicked.connect(self._on_reload)
         self.reload_btn.setEnabled(False)
-        left.addWidget(self.reload_btn)
+        title_row.addWidget(refresh_btn)
+        title_row.addWidget(self.reload_btn)
+        lay.addLayout(title_row)
 
+        self.playlist_list = QListWidget()
+        self.playlist_list.setTextElideMode(Qt.TextElideMode.ElideRight)
+        self.playlist_list.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.playlist_list.currentRowChanged.connect(self._on_select)
+        lay.addWidget(self.playlist_list, 1)
+
+        # 选项
         self.load_time_cb = QCheckBox("加载发行时间（较慢）")
         self.load_time_cb.setChecked(False)
         self.load_time_cb.setToolTip(
             "专辑发行时间要逐张专辑请求，专辑多的大歌单会明显变慢。\n"
             "不勾选时，排序用到「专辑发行时间」会提示按需加载（结果会缓存）。")
-        self.load_time_cb.setStyleSheet("color:#666; font-size:12px;")
-        left.addWidget(self.load_time_cb)
+        lay.addWidget(self.load_time_cb)
 
-        self.import_btn = QPushButton("导入Excel")
+        self.show_id_cb = QCheckBox("显示歌曲 ID")
+        self.show_id_cb.setChecked(False)
+        self.show_id_cb.toggled.connect(lambda on: self.table.setColumnHidden(4, not on))
+        lay.addWidget(self.show_id_cb)
+
+        file_row = QHBoxLayout()
+        file_row.setSpacing(8)
+        self.import_btn = QPushButton("导入 Excel")
         self.import_btn.clicked.connect(self.import_playlist)
-        self.import_btn.setStyleSheet("background:#555; color:white; padding:5px 14px;")
-        left.addWidget(self.import_btn)
-        self.export_btn = QPushButton("导出Excel")
+        self.export_btn = QPushButton("导出 Excel")
         self.export_btn.clicked.connect(self.export_playlist)
         self.export_btn.setEnabled(False)
-        left.addWidget(self.export_btn)
+        file_row.addWidget(self.import_btn)
+        file_row.addWidget(self.export_btn)
+        lay.addLayout(file_row)
 
-        # 登录状态标签（醒目）
-        self.status_lbl2 = QLabel("⚠ 检测登录状态中...")
-        self.status_lbl2.setStyleSheet("color:#888; font-size:12px;")
-        left.addWidget(self.status_lbl2)
+        # 登录
+        divider = QWidget()
+        divider.setFixedHeight(1)
+        divider.setStyleSheet("background:#232323;")
+        lay.addWidget(divider)
 
-        self.login_btn = QPushButton("🔐 扫码登录")
-        self.login_btn.setStyleSheet("color:#1db100; font-weight:bold;")
+        self.status_lbl2 = QLabel("检测登录状态中...")
+        self.status_lbl2.setProperty("variant", "weak")
+        lay.addWidget(self.status_lbl2)
+
+        self.login_btn = QPushButton("扫码登录")
+        self.login_btn.setProperty("variant", "primary")
         self.login_btn.clicked.connect(self._on_login_btn_click)
-        left.addWidget(self.login_btn)
+        lay.addWidget(self.login_btn)
+        return side
 
-        layout.addLayout(left)
+    def _build_content(self) -> QWidget:
+        """右侧：顶栏 + 歌单头部 + 排序卡片 + 曲目列表 + 状态条"""
+        content = QWidget()
+        content.setObjectName("content")
+        outer = QVBoxLayout(content)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
 
-        # ===== 右：排序 + 表格 =====
-        right = QVBoxLayout()
+        body = QWidget()
+        lay = QVBoxLayout(body)
+        lay.setContentsMargins(22, 16, 22, 10)
+        lay.setSpacing(12)
 
-        # 排序选项
-        sort_group = QGroupBox("多级排序")
-        sl = QHBoxLayout()
-        self.sort_cbs = []
-        self.sort_asc_cbs = []  # per-level asc/desc comboboxes
-        for i, label in enumerate(["第1层:", "第2层:", "第3层:"]):
-            cb = QComboBox()
-            cb.addItems(["", "艺人", "专辑", "歌曲名", "入库时间", "专辑发行时间", "自定义顺序"])
-            cb.setMinimumWidth(110)
-            asc_cb = QComboBox()
-            asc_cb.addItems(["升序", "降序"])
-            asc_cb.setMinimumWidth(65)
-            lbl = QLabel(label)
-            lbl.setMinimumWidth(35)
-            sl.addWidget(lbl)
-            sl.addWidget(cb)
-            sl.addWidget(asc_cb)
-            self.sort_cbs.append(cb)
-            self.sort_asc_cbs.append(asc_cb)
-        sl.addStretch()
+        # ---- 顶栏
+        top = QHBoxLayout()
+        top.setSpacing(10)
+        self.search_artists_btn = QPushButton("搜索歌曲 / 专辑")
+        self.search_artists_btn.setProperty("variant", "search")
+        self.search_artists_btn.setFixedHeight(32)
+        self.search_artists_btn.setMinimumWidth(250)
+        self.search_artists_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.search_artists_btn.setToolTip("跨歌单按歌手/专辑/歌曲名筛选，或全网搜索专辑，收进新歌单")
+        self.search_artists_btn.clicked.connect(self._show_search_dialog)
+        top.addWidget(self.search_artists_btn)
+        top.addStretch()
 
-        preview_btn = QPushButton("预览")
+        self.ai_sort_btn = QPushButton("AI 排序")
+        self.ai_sort_btn.setProperty("variant", "ghost")
+        self.ai_sort_btn.clicked.connect(self._show_ai_sort_dialog)
+        top.addWidget(self.ai_sort_btn)
+
+        config_btn = QPushButton("设置")
+        config_btn.setProperty("variant", "ghost")
+        config_btn.clicked.connect(self._open_config)
+        top.addWidget(config_btn)
+        lay.addLayout(top)
+
+        # ---- 歌单头部
+        head = QHBoxLayout()
+        head.setSpacing(12)
+        title_col = QVBoxLayout()
+        title_col.setSpacing(2)
+        self.title_lbl = QLabel("未选择歌单")
+        self.title_lbl.setProperty("variant", "h1")
+        self.sub_lbl = QLabel("从左侧选择一个歌单开始")
+        self.sub_lbl.setProperty("variant", "sub")
+        title_col.addWidget(self.title_lbl)
+        title_col.addWidget(self.sub_lbl)
+        head.addLayout(title_col)
+        head.addStretch()
+
+        preview_btn = QPushButton("▶")
+        preview_btn.setProperty("variant", "round")
+        preview_btn.setFixedSize(38, 38)
+        preview_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        preview_btn.setToolTip("预览排序结果")
         preview_btn.clicked.connect(self.preview)
-        sl.addWidget(preview_btn)
+        head.addWidget(preview_btn)
 
-        self.apply_btn = QPushButton("🚀 直接应用到服务器")
-        self.apply_btn.setStyleSheet("background:#e55; color:white; font-weight:bold; padding:5px 14px;")
+        self.apply_btn = QPushButton("应用到服务器")
+        self.apply_btn.setProperty("variant", "primary")
+        self.apply_btn.setMinimumHeight(34)
+        self.apply_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.apply_btn.clicked.connect(self.apply_to_server)
         self.apply_btn.setEnabled(False)
-        sl.addWidget(self.apply_btn)
+        head.addWidget(self.apply_btn)
+        lay.addLayout(head)
 
-        import_btn = QPushButton("📥 导入Excel")
-        import_btn.clicked.connect(self.import_playlist)
-        import_btn.setStyleSheet("background:#555; color:white; padding:5px 14px;")
-        sl.addWidget(import_btn)
+        # ---- 排序卡片
+        card = QWidget()
+        card.setObjectName("card")
+        cl = QVBoxLayout(card)
+        cl.setContentsMargins(16, 12, 16, 12)
+        cl.setSpacing(10)
 
-        copy_btn = QPushButton("📋 复制排序结果")
-        copy_btn.setStyleSheet("background:#1db100; color:white; font-weight:bold; padding:5px 14px;")
-        copy_btn.clicked.connect(self.copy_result)
-        sl.addWidget(copy_btn)
+        sort_row = QHBoxLayout()
+        sort_row.setSpacing(8)
+        sort_lbl = QLabel("多级排序")
+        sort_lbl.setProperty("variant", "section")
+        sort_row.addWidget(sort_lbl)
+        sort_row.addSpacing(6)
 
-        self.search_artists_btn = QPushButton("🔍 搜索歌曲/专辑")
-        self.search_artists_btn.setToolTip("跨歌单按歌手/专辑/歌曲名筛选，或全网搜索专辑，收进新歌单")
-        self.search_artists_btn.setStyleSheet("background:#09b9d4; color:white; font-weight:bold; padding:5px 14px;")
-        self.search_artists_btn.clicked.connect(self._show_search_dialog)
-        sl.addWidget(self.search_artists_btn)
+        self.sort_cbs = []
+        self.sort_asc_cbs = []
+        for i, label in enumerate(["第1层", "第2层", "第3层"]):
+            cb = QComboBox()
+            cb.addItems(["未设置", "艺人", "专辑", "歌曲名", "入库时间", "专辑发行时间", "自定义顺序"])
+            cb.setMinimumWidth(104)
+            asc_cb = QComboBox()
+            asc_cb.addItems(["升序", "降序"])
+            asc_cb.setFixedWidth(72)
+            lbl = QLabel(label)
+            lbl.setProperty("variant", "weak")
+            sort_row.addWidget(lbl)
+            sort_row.addWidget(cb)
+            sort_row.addWidget(asc_cb)
+            self.sort_cbs.append(cb)
+            self.sort_asc_cbs.append(asc_cb)
+        sort_row.addStretch()
+        cl.addLayout(sort_row)
 
-        self.ai_sort_btn = QPushButton("🤖 AI 排序")
-        self.ai_sort_btn.setStyleSheet("background:#6366f1; color:white; font-weight:bold; padding:5px 14px;")
-        self.ai_sort_btn.clicked.connect(self._show_ai_sort_dialog)
-        sl.addWidget(self.ai_sort_btn)
-
-        sort_group.setLayout(sl)
-        right.addWidget(sort_group)
-
-        # 自定义顺序导入
-        import_group = QGroupBox("自定义顺序")
-        il = QHBoxLayout()
+        custom_row = QHBoxLayout()
+        custom_row.setSpacing(8)
+        custom_lbl = QLabel("自定义顺序")
+        custom_lbl.setProperty("variant", "section")
+        custom_row.addWidget(custom_lbl)
         self.custom_file_lbl = QLabel("未选择文件")
-        self.custom_file_lbl.setStyleSheet("color:#888; font-size:12px;")
-        self.custom_file_lbl.setMaximumWidth(400)
-        import_btn = QPushButton("导入歌曲名单 (.txt/.csv)")
-        import_btn.clicked.connect(self.import_custom_order)
-        clear_btn = QPushButton("清除")
-        clear_btn.clicked.connect(self.clear_custom_order)
-        il.addWidget(self.custom_file_lbl)
-        il.addWidget(import_btn)
-        il.addWidget(clear_btn)
-        il.addStretch()
-        import_group.setLayout(il)
-        right.addWidget(import_group)
+        self.custom_file_lbl.setProperty("variant", "weak")
+        self.custom_file_lbl.setMaximumWidth(420)
+        custom_row.addWidget(self.custom_file_lbl)
+        custom_import_btn = QPushButton("导入名单")
+        custom_import_btn.clicked.connect(self.import_custom_order)
+        custom_row.addWidget(custom_import_btn)
+        custom_clear_btn = QPushButton("清除")
+        custom_clear_btn.clicked.connect(self.clear_custom_order)
+        custom_row.addWidget(custom_clear_btn)
+        custom_row.addStretch()
 
-        # 表格
+        copy_btn = QPushButton("复制结果")
+        copy_btn.setProperty("variant", "ghost")
+        copy_btn.clicked.connect(self.copy_result)
+        custom_row.addWidget(copy_btn)
+        cl.addLayout(custom_row)
+        lay.addWidget(card)
+
+        # ---- 曲目表
         self.table = QTableWidget()
         self.table.setColumnCount(7)
         self.table.setHorizontalHeaderLabels(["#", "歌曲名", "艺人", "专辑", "ID", "入库时间", "发行时间"])
-        self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        self.table.verticalHeader().setVisible(False)
+        self.table.setShowGrid(False)
+        self.table.setAlternatingRowColors(False)
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
-        self.table.setAlternatingRowColors(True)
-        self.table.setMinimumHeight(500)
-        right.addWidget(self.table)
+        self.table.setWordWrap(False)
+        self.table.setTextElideMode(Qt.TextElideMode.ElideRight)
+        self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.table.verticalHeader().setDefaultSectionSize(38)
+        header = self.table.horizontalHeader()
+        header.setFixedHeight(36)
+        header.setHighlightSections(False)
+        widths = {0: 42, 2: 222, 3: 286, 4: 96, 5: 126, 6: 92}
+        for col, w in widths.items():
+            header.setSectionResizeMode(col, QHeaderView.ResizeMode.Fixed)
+            self.table.setColumnWidth(col, w)
+        header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        self.table.setColumnHidden(4, True)
+        self.table.setMinimumHeight(360)
+        lay.addWidget(self.table, 1)
 
+        outer.addWidget(body, 1)
+
+        # ---- 底部状态条
+        bottom = QWidget()
+        bottom.setObjectName("bottombar")
+        bottom.setFixedHeight(42)
+        bl = QHBoxLayout(bottom)
+        bl.setContentsMargins(22, 0, 22, 0)
+        bl.setSpacing(12)
         self.status_lbl = QLabel("就绪")
-        self.status_lbl.setStyleSheet("color:#888; font-size:12px;")
-        right.addWidget(self.status_lbl)
-
-        # 专辑信息加载进度条（放在 status_lbl 下方）
+        self.status_lbl.setProperty("variant", "weak")
+        bl.addWidget(self.status_lbl, 1)
         self.album_progress = QProgressBar()
-        self.album_progress.setFixedHeight(8)
+        self.album_progress.setFixedHeight(4)
+        self.album_progress.setFixedWidth(220)
         self.album_progress.setTextVisible(False)
-        self.album_progress.setStyleSheet("QProgressBar { border: none; background: #e0e0e0; border-radius: 4px; } QProgressBar::chunk { background: #1db100; border-radius: 4px; }")
         self.album_progress.setVisible(False)
-        right.addWidget(self.album_progress)
-
-        layout.addLayout(right)
+        bl.addWidget(self.album_progress)
+        outer.addWidget(bottom)
+        return content
 
     def load_playlists(self):
         self.status_lbl.setText("加载歌单...")
@@ -294,6 +433,8 @@ class MainWindow(QMainWindow):
         self._load_pt = self.load_time_cb.isChecked()
         self._sorted_tracks = None
         self.apply_btn.setEnabled(False)
+        self.title_lbl.setText(self.current_pl_name)
+        self.sub_lbl.setText(f"共 {self._pl_total_tracks} 首" if self._pl_total_tracks else "加载中...")
         self.album_progress.setVisible(True)
         self.album_progress.setMaximum(0)
         self.album_progress.setValue(0)
@@ -405,6 +546,7 @@ class MainWindow(QMainWindow):
             self.table.setItem(i, 3, QTableWidgetItem(al_name))
             track_id = tr.get("encId") or tr.get("id", "")
             self.table.setItem(i, 4, QTableWidgetItem(str(track_id)))
+            self.table.item(i, 1).setToolTip(f"加密ID：{track_id}")
             add_time = (tr.get("extMap") or {}).get("addTime", 0) or tr.get("_addTime", 0)
             if add_time:
                 dt = datetime.datetime.fromtimestamp(add_time / 1000)
@@ -417,7 +559,6 @@ class MainWindow(QMainWindow):
                 self.table.setItem(i, 6, QTableWidgetItem(pub_dt.strftime("%Y-%m-%d")))
             else:
                 self.table.setItem(i, 6, QTableWidgetItem("-"))
-        self.table.resizeRowsToContents()
 
     def _show_tracks(self, tracks):
         _log(f"[_show_tracks] CALLED with {len(tracks)} tracks")
@@ -428,15 +569,13 @@ class MainWindow(QMainWindow):
             self.export_btn.setEnabled(shown > 0)
             self.reload_btn.setEnabled(True)
             pl_total = getattr(self, '_pl_total_tracks', 0) or 0
+            self.sub_lbl.setText(f"共 {shown} 首")
             if pl_total > shown:
-                self.status_lbl.setText(f"已加载 {shown}/{pl_total} 首（歌单较大，部分歌曲暂无法排序）")
-                self.status_lbl.setStyleSheet("color:#e55;")
+                self.status_lbl.setText(f"歌单较大，仅加载了 {shown}/{pl_total} 首")
             elif total > shown:
-                self.status_lbl.setText(f"显示 {shown}/{total} 首（歌单共 {total} 首）")
-                self.status_lbl.setStyleSheet("")
+                self.status_lbl.setText(f"显示 {shown}/{total} 首")
             else:
-                self.status_lbl.setText(f"共 {shown} 首")
-                self.status_lbl.setStyleSheet("")
+                self.status_lbl.setText("就绪")
             _log(f"[_show_tracks] DONE, set {shown} rows")
         except Exception as e:
             _log(f"[_show_tracks] EXCEPTION: {type(e).__name__}: {e}")
@@ -481,7 +620,7 @@ class MainWindow(QMainWindow):
         levels = []
         for cb, asc_cb in zip(self.sort_cbs, self.sort_asc_cbs):
             field = cb.currentText()
-            if not field:
+            if not field or field == "未设置":
                 continue
             reverse = (asc_cb.currentIndex() == 1)
             levels.append((field, reverse))

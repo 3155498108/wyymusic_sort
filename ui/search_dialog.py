@@ -18,6 +18,7 @@ from PyQt6.QtWidgets import (
 )
 
 from logger import _log
+from ui.theme import apply_dark_title_bar
 from ui.ui_thread import post
 from core.ncm_client import (
     ncm_collect_album_tracks, ncm_create_and_fill_playlist,
@@ -31,12 +32,6 @@ from utils.match import (
 MODE_PLAYLIST = "playlist"
 MODE_ALBUM = "album"
 
-_PROGRESS_STYLE = (
-    "QProgressBar { border: none; background: #e0e0e0; border-radius: 4px; }"
-    "QProgressBar::chunk { background: #1db100; border-radius: 4px; }"
-)
-
-
 class SearchDialog(QDialog):
     """多歌单搜索（含搜专辑）/ 全网搜专辑 的统一弹窗"""
 
@@ -49,6 +44,7 @@ class SearchDialog(QDialog):
         self._busy = False
         self._build_ui()
         self._on_mode_changed()
+        apply_dark_title_bar(self)
 
     # ------------------------------------------------------------------ UI
     def _build_ui(self):
@@ -131,20 +127,19 @@ class SearchDialog(QDialog):
 
         # 搜索行
         search_row = QHBoxLayout()
-        self.search_btn = QPushButton("🔍 搜索")
-        self.search_btn.setStyleSheet(
-            "background:#09b9d4; color:white; font-weight:bold; padding:6px 18px;")
+        self.search_btn = QPushButton("搜索")
+        self.search_btn.setProperty("variant", "primary")
+        self.search_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.search_btn.clicked.connect(self._do_search)
         search_row.addWidget(self.search_btn)
         self.status_lbl = QLabel("输入关键词后点击搜索")
-        self.status_lbl.setStyleSheet("color:#888; font-size:12px;")
+        self.status_lbl.setProperty("variant", "weak")
         search_row.addWidget(self.status_lbl, 1)
         layout.addLayout(search_row)
 
         self.progress_bar = QProgressBar()
         self.progress_bar.setFixedHeight(8)
         self.progress_bar.setTextVisible(False)
-        self.progress_bar.setStyleSheet(_PROGRESS_STYLE)
         self.progress_bar.setVisible(False)
         layout.addWidget(self.progress_bar)
 
@@ -157,7 +152,7 @@ class SearchDialog(QDialog):
         self.select_all_cb.stateChanged.connect(self._on_select_all_changed)
         res_top.addWidget(self.select_all_cb)
         self.count_lbl = QLabel("")
-        self.count_lbl.setStyleSheet("color:#666; font-size:12px;")
+        self.count_lbl.setProperty("variant", "weak")
         res_top.addWidget(self.count_lbl, 1)
         res_layout.addLayout(res_top)
 
@@ -165,8 +160,12 @@ class SearchDialog(QDialog):
         self.table.setColumnCount(4)
         self.table.setHorizontalHeaderLabels(["选择", "专辑", "艺人", "数量"])
         self.table.verticalHeader().setVisible(False)
+        self.table.setShowGrid(False)
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
-        self.table.setAlternatingRowColors(True)
+        self.table.setAlternatingRowColors(False)
+        self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.table.verticalHeader().setDefaultSectionSize(34)
+        self.table.horizontalHeader().setFixedHeight(34)
         self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
         self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
         self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
@@ -186,8 +185,8 @@ class SearchDialog(QDialog):
         self.cancel_btn.clicked.connect(self.reject)
         bottom.addWidget(self.cancel_btn)
         self.create_btn = QPushButton("创建歌单")
-        self.create_btn.setStyleSheet(
-            "background:#1db100; color:white; font-weight:bold; padding:6px 20px;")
+        self.create_btn.setProperty("variant", "primary")
+        self.create_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.create_btn.clicked.connect(self._do_create)
         self.create_btn.setEnabled(False)
         bottom.addWidget(self.create_btn)

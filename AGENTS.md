@@ -15,6 +15,7 @@ main.py                 # 入口（~16行），QApplication 启动 + 初始化�
 │   ├── login_dialog.py # LoginDialog，扫码登录弹窗
 │   ├── config_dialog.py # ConfigDialog，AppID/PrivateKey + AI 配置弹窗
 │   ├── search_dialog.py # SearchDialog，多歌单筛选 / 全网搜专辑 → 新建歌单
+│   ├── theme.py        # 网易云风格深色主题（配色 + 全局 QSS + 应用图标 + 深色标题栏）
 │   ├── ai_sort_dialog.py # AISortDialog，AI 智能排序弹窗
 │   └── ui_thread.py    # post()：把后台线程回调安全送回 GUI 线程
 ├── core/
@@ -36,6 +37,7 @@ main.py                 # 入口（~16行），QApplication 启动 + 初始化�
 | `ui/ai_sort_dialog.py` | AI 智能排序弹窗，用户输入排序要求，调用 AI 自动排序 | PyQt6, ai_sorter |
 | `ui/search_dialog.py` | 统一搜索弹窗：① 跨歌单按歌手/专辑/歌名筛选 ② 全网搜专辑收整张；先预览勾选再建歌单 | PyQt6, ncm_client, match |
 | `ui/ui_thread.py` | `post(func, *args)` 通过信号把回调排队到 GUI 线程（工作线程里 QTimer 不可用） | PyQt6 |
+| `ui/theme.py` | `apply_theme(app)` 套用全局 QSS（深色 + #EC4141 红）、`apply_dark_title_bar()` 深色标题栏、`app_icon()` | PyQt6 |
 | `logger.py` | `_log(msg)` 写日志到 TEMP | 无 |
 | `ui/main_window.py` | 主窗口逻辑、track 加载/排序/应用、按需加载发行时间、AI 排序入口 | PyQt6, ncm_client, sort, excel |
 | `ui/login_dialog.py` | 扫码登录弹窗，3秒轮询登录状态 | PyQt6, ncm_client |
@@ -70,6 +72,18 @@ main.py                 # 入口（~16行），QApplication 启动 + 初始化�
    - 用户描述排序要求（如"周杰伦的歌放前面，其余按入库时间排序"）
    - 调用 OpenAI / Claude / Ollama 自动生成排序
    - 排序结果直接应用到表格，支持「直接应用到服务器」
+
+## UI 主题（网易云风格）
+
+外观模仿网易云音乐客户端深色皮肤，全部集中在 `ui/theme.py`：
+
+- 配色：主色 `#EC4141`，内容区 `#1E1E1E`，侧栏 `#191919`，卡片 `#252525`，输入框 `#2A2A2A`
+- 主窗口结构：左侧栏（品牌 + 我的歌单 + 文件操作 + 登录状态）/ 右侧（顶栏搜索 + 歌单头部 + 排序卡片 + 曲目表 + 底部状态条）
+- 控件通过动态属性取样式：`w.setProperty("variant", "primary"|"ghost"|"round"|"search"|"h1"|"section"|"sub"|"weak")`
+  - 属性在控件构造时设置即可；**运行中改属性后要 `_repolish(widget)`**（unpolish/polish）才生效
+- QSS 需要的对勾/下拉箭头图标在 `apply_theme` 时用 QPainter 画到 `TEMP/ncm_sort_theme/` 再引用，不依赖外部资源
+- `apply_dark_title_bar(widget)` 用 DwmSetWindowAttribute 让 Windows 原生标题栏变深色（主窗口和所有弹窗都调用）
+- 表格：`setWordWrap(False)` + `ElideRight` + 固定行高 38，ID 列默认隐藏（侧栏「显示歌曲 ID」可打开，hover 歌曲名也有 tooltip）
 
 ## AI 排序配置
 

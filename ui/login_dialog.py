@@ -4,6 +4,7 @@ from PyQt6.QtCore import QTimer, QUrl
 from PyQt6.QtGui import QDesktopServices
 
 from core.ncm_client import ncm_login_check
+from ui.theme import apply_dark_title_bar
 
 
 class LoginDialog(QDialog):
@@ -15,12 +16,11 @@ class LoginDialog(QDialog):
         layout = QVBoxLayout(self)
 
         lbl = QLabel("请用网易云音乐 App 扫码登录：")
-        lbl.setStyleSheet("font-size:14px; font-weight:bold;")
+        lbl.setProperty("variant", "h1")
         layout.addWidget(lbl)
 
         self.url_edit = QLineEdit(qr_url)
         self.url_edit.setReadOnly(True)
-        self.url_edit.setStyleSheet("color:#1db100; background:#f0f0f0;")
         self.url_edit.returnPressed.connect(self._open_url)
         layout.addWidget(self.url_edit)
 
@@ -29,16 +29,16 @@ class LoginDialog(QDialog):
         layout.addWidget(open_btn)
 
         hint = QLabel("提示：将上方链接复制到手机浏览器打开，或直接扫描二维码")
-        hint.setStyleSheet("color:#888; font-size:12px;")
+        hint.setProperty("variant", "weak")
         hint.setWordWrap(True)
         layout.addWidget(hint)
 
         self.status_lbl = QLabel("等待扫码登录...")
-        self.status_lbl.setStyleSheet("color:#e55; font-size:13px;")
+        self.status_lbl.setStyleSheet("color:#E06C6C; font-size:13px;")
         layout.addWidget(self.status_lbl)
 
         self.ok_btn = QPushButton("已完成扫码")
-        self.ok_btn.setStyleSheet("background:#1db100; color:white; font-weight:bold; padding:6px;")
+        self.ok_btn.setProperty("variant", "primary")
         self.ok_btn.clicked.connect(self._check_login)
         layout.addWidget(self.ok_btn)
 
@@ -47,6 +47,7 @@ class LoginDialog(QDialog):
         layout.addWidget(cancel_btn)
 
         self.qr_url = qr_url
+        apply_dark_title_bar(self)
         self.polling_timer = QTimer()
         self.polling_timer.timeout.connect(self._check_login)
         self.polling_timer.start(3000)

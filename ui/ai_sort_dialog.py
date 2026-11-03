@@ -5,10 +5,10 @@ import threading
 
 from PyQt6.QtWidgets import QDialog, QVBoxLayout, QLabel, QTextEdit, QPushButton, QMessageBox, QProgressBar, QHBoxLayout
 from PyQt6.QtCore import Qt, QTimer
-from PyQt6.QtGui import QColor
 
 from core.ai_sorter import ask_ai_sort
 from constants import CONFIG_FILE
+from ui.theme import apply_dark_title_bar
 from ui.ui_thread import post
 
 
@@ -18,6 +18,7 @@ class AISortDialog(QDialog):
         self.tracks = tracks
         self.sorted_enc_ids = None
         self._setup_ui()
+        apply_dark_title_bar(self)
 
     def _setup_ui(self):
         self.setWindowTitle("AI 智能排序")
@@ -33,13 +34,6 @@ class AISortDialog(QDialog):
         self.prompt_edit = QTextEdit()
         self.prompt_edit.setPlaceholderText("例如：周杰伦的歌放前面，其余按入库时间排序\n或者：按专辑发行时间降序排列")
         self.prompt_edit.setMaximumHeight(100)
-        self.prompt_edit.setTextColor(QColor("#ffffff"))
-        self.prompt_edit.setStyleSheet("""
-            QTextEdit {
-                background: #1a1a1a;
-                border: 1px solid #444444;
-            }
-        """)
         layout.addWidget(self.prompt_edit)
 
         layout.addWidget(QLabel("提示：尽量描述清楚排序规则，AI 会尽可能按要求排序。"))
@@ -47,12 +41,11 @@ class AISortDialog(QDialog):
         self.progress_bar = QProgressBar()
         self.progress_bar.setFixedHeight(8)
         self.progress_bar.setTextVisible(False)
-        self.progress_bar.setStyleSheet("QProgressBar { border: none; background: #e0e0e0; border-radius: 4px; } QProgressBar::chunk { background: #6366f1; border-radius: 4px; }")
         self.progress_bar.setVisible(False)
         layout.addWidget(self.progress_bar)
 
         self.status_lbl = QLabel("")
-        self.status_lbl.setStyleSheet("color:#666; font-size:12px;")
+        self.status_lbl.setProperty("variant", "weak")
         layout.addWidget(self.status_lbl)
 
         layout.addSpacing(10)
@@ -66,7 +59,8 @@ class AISortDialog(QDialog):
 
         self.start_btn = QPushButton("🤖 开始 AI 排序")
         self.start_btn.setMinimumHeight(40)
-        self.start_btn.setStyleSheet("background:#6366f1; color:white; font-weight:bold; padding:5px 20px;")
+        self.start_btn.setProperty("variant", "primary")
+        self.start_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.start_btn.clicked.connect(self._do_sort)
         btns.addWidget(self.start_btn)
 

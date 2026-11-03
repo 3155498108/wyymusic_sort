@@ -3,6 +3,7 @@ import sys
 from PyQt6.QtWidgets import QApplication
 from logger import _log
 from ui.main_window import MainWindow
+from ui.theme import apply_theme
 from ui.ui_thread import init as init_ui_thread
 
 _log("APP START")
@@ -10,6 +11,7 @@ _log("APP START")
 if __name__ == "__main__":
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
+    apply_theme(app)
     init_ui_thread()
     w = MainWindow()
     w.show()
