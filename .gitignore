@@ -8,14 +8,19 @@ __pycache__/
 dist-info/
 .eggs/
 
-# PyInstaller specs
-!NetEaseSorter.spec
+# PyInstaller specs（只保留本项目用到的两个）
 *.spec
+!网易云歌单排序器.spec
+!网易云歌单排序器2.spec
 
 # Build output
 dist/
 build/
+build.bak/
 test_dist/
+*.toc
+*.pyz
+*.pkg
 
 # ncm-cli (external dependency, has its own repo)
 ncm-cli/

@@ -1,4 +1,0 @@
-{
-  "success": false,
-  "message": "未登录，请执行 ncm-cli login 完成登录"
-}

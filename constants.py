@@ -11,8 +11,8 @@ APP_DIR = getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(__file__)))
 
 
 def _base_dir():
-    """返回 dist/ 根目录"""
-    return os.path.dirname(os.path.dirname(sys.executable))
+    """返回 exe 所在目录"""
+    return os.path.dirname(sys.executable)
 
 
 BASE_DIR = _base_dir()
@@ -23,4 +23,5 @@ GLOBAL_NCM_CLI = os.path.join(
     os.path.expanduser("~"), "AppData", "Roaming", "npm",
     "node_modules", "@music163", "ncm-cli", "dist", "index.js"
 )
+CONFIG_FILE = os.path.join(BASE_DIR, "config.json")
 LOCAL_NCM_CLI = os.path.join(BASE_DIR, "ncm-cli", "dist", "index.js")
