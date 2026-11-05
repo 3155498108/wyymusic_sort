@@ -763,31 +763,67 @@ def ncm_reorder_any(
     return result
 
 
+def ncm_remove_from_playlist(
+    playlist_enc_id: str,
+    track_ids: list[str],
+    progress_callback=None,
+    batch_size: int = 100,
+) -> dict | None:
+    """从歌单移除歌曲（分批）
+
+    注意：`playlist remove --songIdList` **必须用 JSON 数组格式**，
+    传逗号分隔会报「readObject出错」；单次参数太长也会失败，所以分批。
+    """
+    if not track_ids:
+        return {"code": 200, "data": {"removed": 0}}
+
+    batches = [track_ids[i:i + batch_size] for i in range(0, len(track_ids), batch_size)]
+    removed = 0
+    for bi, batch in enumerate(batches):
+        payload = json.dumps(batch)
+        rc, out, err = run_ncm_global([
+            "playlist", "remove",
+            "--playlistId", playlist_enc_id,
+            "--songIdList", payload,
+            "--output", "json"
+        ])
+        parsed = _parse_json_output(out)
+        if rc != 0 or not parsed or parsed.get("code") != 200:
+            _log(f"[ncm_remove_from_playlist] batch {bi + 1} failed: {err[:200] or out[:200]}")
+            return {"code": -1,
+                    "message": f"移除歌曲失败（第 {bi + 1}/{len(batches)} 批）：{(err or out)[:200]}"}
+        removed += len(batch)
+        if progress_callback:
+            progress_callback(bi + 1, len(batches), f"正在移除歌曲 {bi + 1}/{len(batches)}")
+    _log(f"[ncm_remove_from_playlist] removed {removed} songs from {playlist_enc_id}")
+    return {"code": 200, "data": {"removed": removed}}
+
+
 def ncm_reorder_in_place(
     playlist_enc_id: str,
     target_ids: list[str],
     progress_callback=None,
-    keep_tail: int = 200,
+    batch_size: int = 100,
 ) -> dict | None:
-    """大歌单**原地重排**（单次 reorder 放不下全部 ID 时的组合方案）
+    """大歌单**原地重排**（单次 reorder 放不下全部 ID 时的方案）
 
-    背景：`playlist reorder` 把 ID 拼进 URL，超过约 8KB（约 235 个 ID）就会被
-    服务端/网关挡掉（表现为「网络好像有点问题」）。而 `playlist add` 走的是
-    另一个请求，可以分批、每批上百首。
+    实测确认的 ncm-cli 行为（2026-11 在真实歌单上验证）：
+      - `playlist reorder` 必须传**完整列表**才生效，传子集会被静默忽略；
+        而且 ID 拼在 URL 里，约 235 个 ID（≈7.7KB）就超过 8KB 上限被服务端拒绝
+      - `playlist remove --songIdList` **必须用 JSON 数组**（逗号分隔会报
+        「readObject出错」），单次也不能太长，所以要分批
+      - `playlist add` 走另一个请求，可以分批；它会把歌曲**前插**到歌单最前面，
+        且批内倒序，所以要**倒序处理批次**才能得到正确顺序
 
-    原理（利用 add 是「前插」这一已验证特性）：
-      1) `reorder` 只保留目标顺序的**尾部** keep_tail 首
-         （其余歌曲只是被移出歌单，歌曲本身没有被删除）
-      2) 再把目标顺序的**前段**分批 `add` 回去
-         —— add 前插，所以加回来的前段正好落在尾部之前，整体顺序与目标完全一致
+    因此大歌单重排只能：
+      1) 分批 remove 掉歌单里现有的歌（歌曲本身不会被删除，只是移出歌单）
+      2) 分批 add 回目标顺序
+      3) 读回歌单校验顺序，不一致会如实报告
 
-    副作用（会在返回值里如实给出）：
-      - 被 add 回来的歌「入库时间」会刷新为当前时间
-      - 个别受限歌曲（VIP/地区限制）可能加不回去，此时返回 missing 列表
+    副作用：所有被 add 回来的歌「入库时间」会刷新为现在。
 
     Returns: {"code":200, "data":{"ordered":bool, "missing":[...], "total":int, "message":str}}
     """
-    # 去重且保持顺序
     targets: list[str] = []
     seen = set()
     for tid in target_ids:
@@ -799,58 +835,49 @@ def ncm_reorder_in_place(
     if total == 0:
         return {"code": 200, "data": {"ordered": True, "missing": [], "total": 0, "message": ""}}
 
-    if total <= keep_tail:
-        # 小歌单直接 reorder，一步到位
-        result = ncm_reorder(playlist_enc_id, targets)
+    # 小歌单直接 reorder，一步到位（保留入库时间）
+    if total <= 200:
+        result = ncm_reorder(playlist_enc_id, targets, batch_size=max(total, 1))
         if not (result and result.get("code") == 200):
             return {"code": -1, "message": f"重排失败：{(result or {}).get('message', '未知错误')}"}
         return {"code": 200, "data": {"ordered": True, "missing": [], "total": total, "message": ""}}
 
-    tail = targets[-keep_tail:]
-    head = targets[:-keep_tail]
+    # 大歌单：先读现有曲目
+    _, tracks = ncm_get_tracks(playlist_enc_id, load_publish_time=False)
+    existing = [t.get("id") or t.get("encId") for t in tracks]
+    _log(f"[ncm_reorder_in_place] {total} 首, 现有 {len(existing)} 首")
 
-    _log(f"[ncm_reorder_in_place] {total} tracks -> keep tail {len(tail)}, add head {len(head)}")
-
-    # 1) 只保留尾部
-    if progress_callback:
-        progress_callback(0, total, f"正在重排（{total} 首，分两步）...")
-    tail_result = ncm_reorder(playlist_enc_id, tail, batch_size=max(len(tail), 1))
-    if not (tail_result and tail_result.get("code") == 200):
-        _log(f"[ncm_reorder_in_place] tail reorder failed: {tail_result}")
-        return {"code": -1, "message": f"重排失败（保留尾段时出错）：{(tail_result or {}).get('message', '未知错误')}"}
-
-    # 2) 把前段分批加回去
-    missing: list[str] = []
-    batch_size = 100
-    batches = [head[i:i + batch_size] for i in range(0, len(head), batch_size)]
-    # add 是「前插」，所以必须**倒序**批次：最后一批先加，最前一批最后加
-    for bi in range(len(batches) - 1, -1, -1):
-        batch = batches[bi]
-        add_result = ncm_add_to_playlist(playlist_enc_id, batch)
-        if not (add_result and add_result.get("code") == 200):
-            _log(f"[ncm_reorder_in_place] batch {bi + 1}/{len(batches)} failed: {add_result}")
-            missing.extend(batch)
-            continue
+    def _progress(cur, cnt, msg):
         if progress_callback:
-            done = len(tail) + (len(batches) - bi) * batch_size
-            progress_callback(done, total, f"正在重排（{len(batches) - bi}/{len(batches)} 批）...")
+            progress_callback(cur, cnt * 2, msg)
 
-    # 3) 读回校验实际顺序
+    # 1) 清空（分批 remove）
+    if existing:
+        rm = ncm_remove_from_playlist(playlist_enc_id, existing,
+                                       progress_callback=lambda c, n, m: _progress(c, n, m))
+        if not (rm and rm.get("code") == 200):
+            return {"code": -1, "message": f"清空歌单失败：{(rm or {}).get('message', '未知错误')}"}
+
+    # 2) 按目标顺序写回（add 内部已做倒序批次补偿）
+    add = ncm_add_to_playlist(playlist_enc_id, targets,
+                               progress_callback=lambda c, n, m: _progress(c + n, n, m))
+    if not (add and add.get("code") == 200):
+        return {"code": -1, "message": f"写回歌曲失败：{(add or {}).get('message', '未知错误')}"}
+
+    # 3) 读回校验
     ordered_ok = True
+    missing: list[str] = []
     try:
         _, tracks_after = ncm_get_tracks(playlist_enc_id, load_publish_time=False)
         ids_after = [t.get("id") or t.get("encId") for t in tracks_after]
-        if missing:
-            ordered_ok = False
-        else:
-            ordered_ok = ids_after[:len(targets)] == targets
+        missing = [t for t in targets if t not in set(ids_after)]
+        ordered_ok = (ids_after == targets)
     except Exception as e:
         _log(f"[ncm_reorder_in_place] verify failed: {e}")
 
     message = ""
     if missing:
-        message = (f"有一批 {len(missing)} 首未能加回"
-                   f"（该批里可能含 VIP / 地区限制歌曲，未加回的部分已从歌单移除）")
+        message = f"有 {len(missing)} 首未能写回（可能是 VIP / 地区限制歌曲）"
     elif not ordered_ok:
         message = "顺序校验未通过，建议重新检查歌单"
 

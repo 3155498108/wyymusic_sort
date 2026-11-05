@@ -773,8 +773,8 @@ class MainWindow(QMainWindow):
         if is_large:
             btn_reorder = QPushButton(
                 "原地重排（保留原歌单）\n"
-                "优先直连接口（保留入库时间），不可用时自动改用分步重排\n"
-                "⚠️ 分步重排会让歌曲「入库时间」刷新为现在")
+                "优先直连接口（保留入库时间）；不可用时自动改用重建式重排\n"
+                "⚠️ 重建式重排会让歌曲「入库时间」刷新为现在，且需要一两分钟")
         else:
             btn_reorder = QPushButton("直接修改原歌单\n（快速）")
         btn_reorder.setMinimumHeight(62)
