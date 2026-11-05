@@ -401,19 +401,24 @@ def _do_reorder(playlist_enc_id: str, track_ids: list[str]) -> dict | None:
 
 
 def ncm_reorder(playlist_enc_id: str, track_ids_ordered: list[str],
-                batch_size: int = 30) -> dict | None:
+                batch_size: int | None = None) -> dict | None:
     """
-    调用 ncm-cli playlist reorder，分批执行（每批30首）
-    重要：每批包含到当前位置的全部 ID，因为 API 是替换操作
-    例如 371 首分批：
-      Batch 1: IDs 1-30    → 服务器歌单 = 1-30
-      ...
-      Batch 13: IDs 1-371  → 服务器歌单 = 1-371
+    调用 ncm-cli playlist reorder 调整歌单顺序（**只改顺序，不动歌曲成员**，
+    因此「入库时间」完全不变 —— 已实测验证）
+
+    实测（2026-11）：该接口**必须传完整列表**才生效，传子集会被静默忽略；
+    而 ID 拼在 URL 里，约 235 个（≈7.7KB）就超 8KB 上限。
+
+    所以 ≤200 首时**一次把完整列表发完**（实测 200 首约 9 秒）；
+    超过 200 首请改用 ncm_reorder_in_place（remove + add 分批方案）。
     """
-    _log(f"[ncm_reorder] total tracks={len(track_ids_ordered)}, batch_size={batch_size}")
+    total = len(track_ids_ordered)
+    if batch_size is None:
+        batch_size = total if total <= 200 else 30
+    _log(f"[ncm_reorder] total tracks={total}, batch_size={batch_size}")
     all_ok = True
     last_result = None
-    total_batches = (len(track_ids_ordered) + batch_size - 1) // batch_size
+    total_batches = (total + batch_size - 1) // batch_size
     for i in range(0, len(track_ids_ordered), batch_size):
         # 关键修复：每批包含从头到当前位置的全部 ID
         # 而不是只包含当前批次的 ID
