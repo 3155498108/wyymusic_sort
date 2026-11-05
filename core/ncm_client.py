@@ -679,10 +679,25 @@ def ncm_append_to_playlist(
     desired = existing_ids + new_ids
     if to_end and len(desired) <= 200:
         reorder_result = ncm_reorder(playlist_enc_id, desired)
-        if reorder_result and reorder_result.get("code") == 200:
-            position = "end"
+        if not (reorder_result and reorder_result.get("code") == 200):
+            _log(f"[ncm_append_to_playlist] reorder failed: {reorder_result}")
+
+    # 读回真实顺序判定落点（不靠推测，界面提示才可信）
+    try:
+        _, tracks_after = ncm_get_tracks(playlist_enc_id, load_publish_time=False)
+        ids_after = [t.get("id") or t.get("encId") for t in tracks_after]
+        new_set = set(new_ids)
+        first_new = next((i for i, tid in enumerate(ids_after) if tid in new_set), None)
+        if first_new is None:
+            position = "unknown"
         else:
-            _log(f"[ncm_append_to_playlist] reorder failed, keep at top: {reorder_result}")
+            tail = ids_after[first_new + len(new_ids):]
+            position = "end" if not any(tid in new_set for tid in tail) else "middle"
+            if first_new == 0 and position != "end":
+                position = "top"
+    except Exception as e:
+        _log(f"[ncm_append_to_playlist] read-back failed: {e}")
+        position = "end" if to_end and len(desired) <= 200 else "top"
 
     return {
         "code": 200,

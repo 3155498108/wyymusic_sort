@@ -571,7 +571,11 @@ class SearchDialog(QDialog):
                 self.status_lbl.setText("歌单里已经有这些歌了，没有重复添加")
                 QMessageBox.information(self, "完成", "这些歌曲已经存在于该歌单中，未重复添加。")
                 return
-            where = "歌单末尾" if position == "end" else "歌单开头"
+            where = {
+                "end": "歌单末尾",
+                "top": "歌单开头",
+                "middle": "歌单中间",
+            }.get(position, "歌单内")
             extra = f"\n有 {skipped} 首已存在，已跳过。" if skipped else ""
             self.status_lbl.setText(f"✅ 已添加 {added} 首到「{name}」{where}")
             QMessageBox.information(
