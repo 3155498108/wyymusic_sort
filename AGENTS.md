@@ -47,6 +47,22 @@ main.py                 # 入口（~16行），QApplication 启动 + 初始化�
 | `utils/match.py` | `normalize`, `parse_keywords`（支持 - 排除）, `track_matches`, `group_by_album` | re, unicodedata |
 | `utils/excel.py` | `export_table_to_excel`, `import_tracks_from_excel` | openpyxl |
 
+## 大歌单原地重排（>200 首）
+
+`playlist reorder` 把 ID 拼进 URL，约 235 个 ID（≈7.7KB）就超过服务端/网关的 8KB 上限，
+表现为「网络好像有点问题」。ncm-cli 0.1.7 也没解决（参数没变）。
+
+**组合方案**（`core/ncm_client.ncm_reorder_in_place`）：
+
+1. `reorder` 只保留目标顺序的**尾部** ≤200 首（一次请求发完；其余只是被移出歌单，歌曲本身没删）
+2. 再把目标顺序的**前段**每 100 首一批 `add` 回去
+   —— `playlist add` 是「前插」（且批内倒序），所以**倒序处理批次**后加回来的整体顺序与目标完全一致
+3. 最后读回歌单顺序做校验，不一致会如实报告
+
+副作用：被 add 回来的歌「入库时间」会刷新为现在；整批失败时该批歌曲不在歌单里（会返回 missing 列表）。
+
+**实测（模拟 ncm-cli 语义）**：4374 首完全倒序 → 43 次请求，顺序逐项校验一致。
+
 ## 已知问题与限制
 
 1. **大歌单 reorder**：歌单超过200首时，ncm-cli `--trackIds` 命令行参数超限（~235 IDs 逗号分隔）。解决方案：大歌单用 `ncm_create_and_fill_playlist` 新建歌单分批添加歌曲，绕过命令行限制。

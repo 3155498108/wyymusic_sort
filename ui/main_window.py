@@ -16,7 +16,7 @@ from constants import CONFIG_FILE
 from core.ncm_client import (
     ncm_login_check, ncm_logout, ncm_login,
     ncm_get_tracks, ncm_reorder, ncm_create_and_fill_playlist,
-    ncm_fill_publish_time,
+    ncm_fill_publish_time, ncm_reorder_in_place,
 )
 from ui.login_dialog import LoginDialog
 from ui.config_dialog import ConfigDialog
@@ -728,52 +728,62 @@ class MainWindow(QMainWindow):
         playlist_name = self.playlist_list.currentItem().text().split("(")[0].strip()
         is_large = len(enc_ids) > 200
 
+        # 统一弹窗：新建歌单 / 原地修改（≤200 直接重排，>200 用组合方案）
+        dlg = QDialog(self)
+        dlg.setWindowTitle("选择排序方式")
+        dlg.setMinimumWidth(460)
+        layout = QVBL2()
+        layout.setContentsMargins(22, 18, 22, 16)
+        layout.setSpacing(10)
+
         if is_large:
-            # 大歌单：只能用新建歌单方式
-            reply = QMessageBox.question(
-                self, "确认",
-                f"歌单共 {len(enc_ids)} 首，将创建新歌单「{playlist_name}-排序版」并分批添加歌曲。\n\n此操作不可撤销。\n\n⚠️ 在排序完成之前，请勿在网页或客户端刷新歌单！",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
-            )
-            if reply != QMessageBox.StandardButton.Yes:
-                return
+            tip = QLabel(
+                f"歌单共 {len(enc_ids)} 首，超过 200 首时无法一次性重排（ID 过长会被服务端拒绝）。\n"
+                "可以选择新建一个排序后的副本，或者原地重排：")
+            tip.setWordWrap(True)
+            layout.addWidget(tip)
+        else:
+            layout.addWidget(QLabel(f"歌单共 {len(enc_ids)} 首，请选择排序方式："))
+        layout.addSpacing(6)
+
+        def do_new():
+            dlg.accept()
+            new_name = f"{playlist_name}-排序版"
             self.status_lbl.setText("正在创建新歌单并添加歌曲...")
             self.apply_btn.setEnabled(False)
-            threading.Thread(target=self._bg_create_and_fill, args=(enc_ids,), daemon=True).start()
-        else:
-            # 小歌单：让用户选择方式
-            dlg = QDialog(self)
-            dlg.setWindowTitle("选择排序方式")
-            dlg.setMinimumWidth(400)
-            layout = QVBL2()
-            layout.addWidget(QLabel(f"歌单共 {len(enc_ids)} 首，请选择排序方式："))
-            layout.addSpacing(10)
+            threading.Thread(target=self._bg_create_and_fill, args=(enc_ids, new_name), daemon=True).start()
 
-            def do_new():
-                dlg.accept()
-                new_name = f"{playlist_name}-排序版"
-                self.status_lbl.setText("正在创建新歌单并添加歌曲...")
-                self.apply_btn.setEnabled(False)
-                threading.Thread(target=self._bg_create_and_fill, args=(enc_ids, new_name), daemon=True).start()
-
-            def do_reorder():
-                dlg.accept()
+        def do_reorder():
+            dlg.accept()
+            if is_large:
+                self.status_lbl.setText("正在原地重排（分两步，请勿刷新歌单）...")
+            else:
                 self.status_lbl.setText("正在应用排序到服务器...")
-                self.apply_btn.setEnabled(False)
-                threading.Thread(target=self._bg_reorder, args=(enc_ids,), daemon=True).start()
+            self.apply_btn.setEnabled(False)
+            threading.Thread(target=self._bg_reorder, args=(enc_ids,), daemon=True).start()
 
-            btn_new = QPushButton(f"🆕 新建歌单「{playlist_name}-排序版」\n（稳定可靠，推荐）")
-            btn_new.setMinimumHeight(60)
-            btn_new.clicked.connect(do_new)
+        btn_new = QPushButton(f"新建歌单「{playlist_name}-排序版」\n（稳定可靠，原歌单不变）")
+        btn_new.setMinimumHeight(62)
+        btn_new.setProperty("variant", "primary")
+        btn_new.clicked.connect(do_new)
+        layout.addWidget(btn_new)
 
-            btn_reorder = QPushButton("♻️ 直接修改原歌单\n（快速，但大歌单可能失败）")
-            btn_reorder.setMinimumHeight(60)
-            btn_reorder.clicked.connect(do_reorder)
+        if is_large:
+            btn_reorder = QPushButton(
+                "原地重排（保留原歌单）\n"
+                "⚠️ 歌曲「入库时间」会刷新为现在；个别受限歌曲可能加不回去")
+        else:
+            btn_reorder = QPushButton("直接修改原歌单\n（快速）")
+        btn_reorder.setMinimumHeight(62)
+        btn_reorder.clicked.connect(do_reorder)
+        layout.addWidget(btn_reorder)
 
-            layout.addWidget(btn_new)
-            layout.addWidget(btn_reorder)
-            dlg.setLayout(layout)
-            dlg.exec()
+        layout.addSpacing(4)
+        hint = QLabel("提示：重排完成前请勿在网页或客户端刷新歌单。")
+        hint.setProperty("variant", "weak")
+        layout.addWidget(hint)
+        dlg.setLayout(layout)
+        dlg.exec()
 
     def _bg_create_and_fill(self, enc_ids, new_name=None):
         if new_name is None:
@@ -784,7 +794,19 @@ class MainWindow(QMainWindow):
 
     def _bg_reorder(self, enc_ids):
         _log("[_bg_reorder] started")
-        result = ncm_reorder(self.current_pl_enc_id, enc_ids)
+        if len(enc_ids) > 200:
+            # 大歌单：单次 reorder 放不下，用「reorder 尾段 + add 前段」组合方案
+            def _progress(cur, total, msg):
+                def _do():
+                    self.album_progress.setVisible(True)
+                    self.album_progress.setMaximum(max(total, 1))
+                    self.album_progress.setValue(cur)
+                    self.status_lbl.setText(msg)
+                post(_do)
+
+            result = ncm_reorder_in_place(self.current_pl_enc_id, enc_ids, progress_callback=_progress)
+        else:
+            result = ncm_reorder(self.current_pl_enc_id, enc_ids)
         _log("[_bg_reorder] done, posting UI update")
         post(self._do_update_ui, result, enc_ids)
 
@@ -803,8 +825,22 @@ class MainWindow(QMainWindow):
             enc_to_tr = {tr.get("encId"): tr for tr in self.current_tracks if tr.get("encId")}
             self.current_tracks = [enc_to_tr[e] for e in enc_ids if e in enc_to_tr]
             self._sorted_tracks = None
-            self.status_lbl.setText(f"✅ 排序成功应用（{len(enc_ids)} 首）")
-            QTimer.singleShot(0, lambda: QMessageBox.information(self, "成功", f"已成功将 {len(enc_ids)} 首歌曲排序到服务器！\n\n刷新歌单即可看到新顺序。"))
+            data = result.get("data") or {}
+            missing = data.get("missing") or []
+            note = data.get("message") or ""
+            if note:
+                self.status_lbl.setText(f"⚠️ 排序已应用，但{note}")
+            else:
+                self.status_lbl.setText(f"✅ 排序成功应用（{len(enc_ids)} 首）")
+            extra = ""
+            if missing:
+                extra = (f"\n\n⚠️ 有 {len(missing)} 首没能加回该歌单"
+                         f"（可能是 VIP / 地区限制歌曲）。\n这些歌已不在歌单中，"
+                         f"可以手动加回或在客户端检查。")
+            elif note:
+                extra = f"\n\n⚠️ {note}"
+            QTimer.singleShot(0, lambda: QMessageBox.information(
+                self, "成功", f"已成功将 {len(enc_ids)} 首歌曲排序到服务器！{extra}\n\n刷新歌单即可看到新顺序。"))
         else:
             msg = result.get("message", "未知错误")
             QTimer.singleShot(0, lambda: QMessageBox.warning(self, "排序失败", f"服务器返回错误：{msg}\n\ncode: {code}"))
