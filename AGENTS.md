@@ -68,6 +68,7 @@ main.py                 # 入口（~16行），QApplication 启动 + 初始化�
    - **从我的歌单中筛选**：多选歌单 + 关键词（每行一个，`-` 开头为排除）+ 匹配字段（歌手/专辑/歌曲名）
      → `ncm_search_tracks_in_playlists()` 每个歌单只抓一次 → 按专辑分组展示，可取消勾选某些专辑 → 建歌单
    - **全网搜索专辑**：关键词 → `ncm_search_albums()` → 专辑列表（可勾选）→ `ncm_collect_album_tracks()` 拉整张专辑歌曲 → 建歌单
+   - 底部「目标」可选：**新建歌单** 或 **添加到已有歌单**（下拉列出全部自建歌单，可勾选「加到歌单末尾」）
 8. **AI 智能排序** → `_show_ai_sort_dialog()` → `AISortDialog`
    - 用户描述排序要求（如"周杰伦的歌放前面，其余按入库时间排序"）
    - 调用 OpenAI / Claude / Ollama 自动生成排序
@@ -117,6 +118,9 @@ ncm-cli 需全局安装（`npm install -g @music163/ncm-cli`）。调用通过 `
 - `ncm_search_albums(keyword, limit)` → `run_ncm_global(["search", "album", "--keyword", kw, "--limit", str(limit), "--output", "json"])`，返回 `data.records`
 - `ncm_get_album_tracks(album_enc_id)` → `run_ncm_global(["album", "tracks", "--albumId", id, "--output", "json"])`，返回整张专辑歌曲
 - `ncm_collect_album_tracks(albums, progress_callback)` → 多专辑并发拉取 + 按专辑顺序去重合并
+- `ncm_add_to_playlist(playlist_enc_id, track_ids, progress_callback)` → 向**已有歌单**添加歌曲（沿用新建歌单的双重反转补偿）
+- `ncm_append_to_playlist(playlist_enc_id, track_ids, to_end)` → 加到已有歌单并尽量放到末尾：先 add（会落在歌单前部），
+  再在总数 ≤200 时用 reorder 修正为「原曲目 + 新曲目」；返回 {added, skipped, position, total}
 - `ncm_search_artists_in_playlists(...)` → 兼容旧接口，内部转调 `ncm_search_tracks_in_playlists(fields=("artist",))`
 
 ## 关键发现（实践经验）

@@ -21,7 +21,7 @@ from logger import _log
 from ui.theme import apply_dark_title_bar
 from ui.ui_thread import post
 from core.ncm_client import (
-    ncm_collect_album_tracks, ncm_create_and_fill_playlist,
+    ncm_collect_album_tracks, ncm_create_and_fill_playlist, ncm_append_to_playlist,
     ncm_search_albums, ncm_search_tracks_in_playlists,
 )
 from utils.match import (
@@ -175,13 +175,43 @@ class SearchDialog(QDialog):
         self.result_box.setEnabled(False)
         layout.addWidget(self.result_box, 1)
 
-        # 底部
+        # ---- 目标（新建 / 已有歌单）
+        target_row = QHBoxLayout()
+        target_row.setSpacing(8)
+        target_lbl = QLabel("目标")
+        target_lbl.setProperty("variant", "section")
+        target_row.addWidget(target_lbl)
+
+        self.target_cb = QComboBox()
+        self.target_cb.setMinimumWidth(320)
+        self.target_cb.addItem("＋ 新建歌单", "new")
+        for p in self.playlists:
+            name = p.get("name", "?")
+            count = p.get("trackCount", 0) or 0
+            self.target_cb.addItem(f"📁 {name}  ({count}首)", p.get("id", ""))
+        self.target_cb.currentIndexChanged.connect(self._on_target_changed)
+        target_row.addWidget(self.target_cb)
+
+        self.pos_cb = QCheckBox("加到歌单末尾")
+        self.pos_cb.setChecked(True)
+        self.pos_cb.setToolTip(
+            "ncm-cli 添加歌曲默认落在歌单前面。\n"
+            "勾选后会在歌曲总数 ≤200 时用 reorder 把它们移到末尾；\n"
+            "歌单太大时无法重排，只会加到前面。")
+        target_row.addWidget(self.pos_cb)
+        target_row.addStretch()
+        layout.addLayout(target_row)
+
+        # ---- 底部
         bottom = QHBoxLayout()
-        bottom.addWidget(QLabel("新歌单名称："))
+        self.name_lbl = QLabel("新歌单名称")
+        self.name_lbl.setProperty("variant", "section")
+        bottom.addWidget(self.name_lbl)
         self.name_edit = QLineEdit()
         self.name_edit.setPlaceholderText("例如：逆転裁判 精选")
         bottom.addWidget(self.name_edit, 1)
         self.cancel_btn = QPushButton("关闭")
+        self.cancel_btn.setFixedWidth(96)
         self.cancel_btn.clicked.connect(self.reject)
         bottom.addWidget(self.cancel_btn)
         self.create_btn = QPushButton("创建歌单")
@@ -414,6 +444,22 @@ class SearchDialog(QDialog):
             self.count_lbl.setText(f"已勾选 {len(rows)} 张专辑")
 
     # ----------------------------------------------------------------- 创建
+    def _current_target(self) -> str:
+        return self.target_cb.currentData() or "new"
+
+    def _on_target_changed(self, *args):
+        """切换目标：新建歌单 ⇄ 已有歌单"""
+        is_new = self._current_target() == "new"
+        self.name_lbl.setVisible(is_new)
+        self.name_edit.setVisible(is_new)
+        self.pos_cb.setVisible(not is_new)
+        self.create_btn.setText("创建歌单" if is_new else "添加到歌单")
+        if is_new and not self.name_edit.text().strip():
+            raw = self.keyword_edit.toPlainText().strip()
+            first = raw.splitlines()[0].lstrip("-!").strip() if raw else ""
+            if first:
+                self.name_edit.setText(f"{first} 合集")
+
     def _do_create(self):
         if self._busy:
             return
@@ -421,8 +467,10 @@ class SearchDialog(QDialog):
         if not rows:
             QMessageBox.warning(self, "提示", "请至少勾选一张专辑")
             return
+
+        target = self._current_target()
         new_name = self.name_edit.text().strip()
-        if not new_name:
+        if target == "new" and not new_name:
             QMessageBox.warning(self, "提示", "请输入新歌单名称")
             return
 
@@ -441,16 +489,16 @@ class SearchDialog(QDialog):
             if not enc_ids:
                 QMessageBox.warning(self, "提示", "没有可收录的歌曲")
                 return
-            self._start_create(new_name, enc_ids)
+            self._start_create(new_name, enc_ids, target)
         else:
             albums = [self._albums[r] for r in rows if r < len(self._albums)]
             self._set_busy(True, "正在获取专辑歌曲...")
             self.progress_bar.setVisible(True)
             self.progress_bar.setMaximum(0)
             threading.Thread(target=self._bg_collect_albums,
-                             args=(albums, new_name), daemon=True).start()
+                             args=(albums, new_name, target), daemon=True).start()
 
-    def _bg_collect_albums(self, albums, new_name):
+    def _bg_collect_albums(self, albums, new_name, target):
         try:
             enc_ids, _ = ncm_collect_album_tracks(albums, progress_callback=self._progress)
         except Exception as e:
@@ -460,32 +508,49 @@ class SearchDialog(QDialog):
         if not enc_ids:
             self._ui(self._search_failed, "专辑里没有可收录的歌曲")
             return
-        self._ui(lambda: self._start_create(new_name, enc_ids, already_busy=True))
+        self._ui(lambda: self._start_create(new_name, enc_ids, target, already_busy=True))
 
-    def _start_create(self, new_name: str, enc_ids: list[str], already_busy: bool = False):
+    def _start_create(self, new_name: str, enc_ids: list[str], target: str,
+                      already_busy: bool = False):
+        is_new = target == "new"
+        verb = "创建歌单" if is_new else "添加到歌单"
         if not already_busy:
-            self._set_busy(True, f"正在创建歌单（{len(enc_ids)} 首）...")
+            self._set_busy(True, f"正在{verb}（{len(enc_ids)} 首）...")
         else:
-            self.status_lbl.setText(f"正在创建歌单（{len(enc_ids)} 首）...")
+            self.status_lbl.setText(f"正在{verb}（{len(enc_ids)} 首）...")
         self.progress_bar.setVisible(True)
         self.progress_bar.setMaximum(0)
-        threading.Thread(target=self._bg_create, args=(new_name, enc_ids), daemon=True).start()
+        threading.Thread(target=self._bg_create, args=(new_name, enc_ids, target),
+                         daemon=True).start()
 
-    def _bg_create(self, new_name, enc_ids):
+    def _bg_create(self, new_name, enc_ids, target):
         try:
-            result = ncm_create_and_fill_playlist(
-                new_name, enc_ids,
-                progress_callback=lambda cur, total, msg: self._ui(self.status_lbl.setText, msg),
-            )
+            if target == "new":
+                result = ncm_create_and_fill_playlist(
+                    new_name, enc_ids,
+                    progress_callback=lambda cur, total, msg: self._ui(self.status_lbl.setText, msg),
+                )
+            else:
+                result = ncm_append_to_playlist(
+                    target, enc_ids,
+                    to_end=self.pos_cb.isChecked(),
+                    progress_callback=lambda cur, total, msg: self._ui(self.status_lbl.setText, msg),
+                )
         except Exception as e:
             _log(f"[SearchDialog] create failed: {e}")
             self._ui(self._create_failed, str(e))
             return
-        self._ui(self._create_done, result, new_name, enc_ids)
+        self._ui(self._create_done, result, new_name, enc_ids, target)
 
-    def _create_done(self, result, new_name, enc_ids):
+    def _create_done(self, result, new_name, enc_ids, target):
         self._set_busy(False, "")
-        if result and result.get("code") == 200:
+        if not (result and result.get("code") == 200):
+            msg = (result or {}).get("message", "未知错误")
+            self.status_lbl.setText(f"❌ 失败：{msg}")
+            self.create_btn.setEnabled(True)
+            return
+
+        if target == "new":
             self.result_playlist_id = result.get("data", {}).get("id", "")
             count = result.get("data", {}).get("trackCount", len(enc_ids))
             self.status_lbl.setText(f"✅ 歌单「{new_name}」创建成功，共 {count} 首")
@@ -495,12 +560,31 @@ class SearchDialog(QDialog):
                 f"歌单ID：{self.result_playlist_id}\n\n"
                 f"如果客户端未立即显示，下拉刷新一下。",
             )
-            self.create_btn.setText("已完成")
-            self.create_btn.setEnabled(False)
+        else:
+            data = result.get("data", {})
+            added = data.get("added", 0)
+            skipped = data.get("skipped", 0)
+            position = data.get("position", "top")
+            total = data.get("total", 0)
+            name = self.target_cb.currentText().replace("📁", "").strip()
+            if added == 0:
+                self.status_lbl.setText("歌单里已经有这些歌了，没有重复添加")
+                QMessageBox.information(self, "完成", "这些歌曲已经存在于该歌单中，未重复添加。")
+                return
+            where = "歌单末尾" if position == "end" else "歌单开头"
+            extra = f"\n有 {skipped} 首已存在，已跳过。" if skipped else ""
+            self.status_lbl.setText(f"✅ 已添加 {added} 首到「{name}」{where}")
+            QMessageBox.information(
+                self, "完成",
+                f"已向歌单「{name}」添加 {added} 首歌曲（{where}，现共 {total} 首）。{extra}\n\n"
+                f"如果客户端未立即显示，下拉刷新一下。",
+            )
+        self.create_btn.setText("已完成")
+        self.create_btn.setEnabled(False)
 
     def _create_failed(self, msg: str):
         self._set_busy(False, "创建失败")
-        QMessageBox.warning(self, "错误", f"创建歌单失败：{msg}")
+        QMessageBox.warning(self, "错误", f"操作失败：{msg}")
 
     # ------------------------------------------------------------- 线程/UI桥
     def _ui(self, func, *args):

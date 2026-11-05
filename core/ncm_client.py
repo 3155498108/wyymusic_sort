@@ -592,6 +592,109 @@ def ncm_create_and_fill_playlist(playlist_name: str, track_ids: list[str], progr
     }
 
 
+def ncm_add_to_playlist(playlist_enc_id: str, track_ids: list[str], progress_callback=None) -> dict | None:
+    """向**已有歌单**添加歌曲（保持传入的相对顺序）
+
+    ncm-cli `playlist add` 的两层反转（见 AGENTS.md）：
+      1. 批次内部反转：传入 [A,B,C,D]，实际加入的是 [D,C,B,A]
+      2. 批次顺序反转：后添加的批次排在更靠前的位置
+    因此沿用新建歌单的补偿方式：**倒序处理批次 + 每批先反转再传入**，
+    这样新歌之间顺序正确；它们会落在歌单的前部（原有歌曲之后想用 reorder 调整）。
+    """
+    if not track_ids:
+        return {"code": 200, "data": {"added": 0}}
+
+    batch_size = 100
+    batches = [track_ids[i:i + batch_size] for i in range(0, len(track_ids), batch_size)]
+    total_batches = len(batches)
+
+    for bi in range(total_batches - 1, -1, -1):
+        batch = batches[bi]
+        display_batch = total_batches - bi
+        track_ids_json = json.dumps(list(reversed(batch)))
+        _log(f"[ncm_add_to_playlist] adding batch {display_batch}/{total_batches} "
+             f"({len(batch)} tracks) to {playlist_enc_id}")
+
+        rc_add, out_add, err_add = run_ncm_global([
+            "playlist", "add",
+            "--playlistId", playlist_enc_id,
+            "--songIdList", track_ids_json,
+            "--output", "json"
+        ])
+        if rc_add != 0:
+            _log(f"[ncm_add_to_playlist] batch {display_batch} failed: {err_add[:300]}")
+            return {"code": -1, "message": f"添加歌曲失败 batch{display_batch}: {err_add[:200]}"}
+
+        parsed_add = _parse_json_output(out_add)
+        if not parsed_add or parsed_add.get("code") != 200:
+            _log(f"[ncm_add_to_playlist] batch {display_batch} parse error: {out_add[:200]}")
+            return {"code": -1, "message": f"添加歌曲解析失败 batch{display_batch}: {out_add[:200]}"}
+
+        if progress_callback:
+            try:
+                progress_callback(display_batch, total_batches, f"正在添加歌曲 {display_batch}/{total_batches}")
+            except TypeError:
+                progress_callback(display_batch, total_batches)
+
+    _log(f"[ncm_add_to_playlist] done, {len(track_ids)} tracks -> {playlist_enc_id}")
+    return {"code": 200, "data": {"added": len(track_ids)}}
+
+
+def ncm_append_to_playlist(
+    playlist_enc_id: str,
+    track_ids: list[str],
+    to_end: bool = True,
+    progress_callback=None,
+) -> dict | None:
+    """把歌曲加进**已有歌单**，并尽量放到歌单末尾
+
+    流程：
+      1. 读取歌单当前曲目（用于去重与还原顺序）
+      2. `ncm_add_to_playlist` 添加（会落在歌单前部）
+      3. to_end=True 且总数 ≤200 时，用 reorder 把顺序修正为「原曲目 + 新曲目」
+         （reorder 的命令行有 ~235 个 ID 的长度上限，超过只能保持在前面）
+
+    返回 data: {added, skipped, position, total}
+    """
+    enc_ids, tracks = ncm_get_tracks(playlist_enc_id, load_publish_time=False)
+    existing_ids = [t.get("id") or t.get("encId") for t in tracks]
+    existing_set = set(existing_ids)
+
+    new_ids = []
+    seen = set()
+    for tid in track_ids:
+        if tid and tid not in existing_set and tid not in seen:
+            seen.add(tid)
+            new_ids.append(tid)
+
+    if not new_ids:
+        return {"code": 200, "data": {"added": 0, "skipped": len(track_ids),
+                                      "position": "已存在", "total": len(existing_ids)}}
+
+    add_result = ncm_add_to_playlist(playlist_enc_id, new_ids, progress_callback)
+    if not add_result or add_result.get("code") != 200:
+        return add_result or {"code": -1, "message": "添加歌曲失败"}
+
+    position = "top"
+    desired = existing_ids + new_ids
+    if to_end and len(desired) <= 200:
+        reorder_result = ncm_reorder(playlist_enc_id, desired)
+        if reorder_result and reorder_result.get("code") == 200:
+            position = "end"
+        else:
+            _log(f"[ncm_append_to_playlist] reorder failed, keep at top: {reorder_result}")
+
+    return {
+        "code": 200,
+        "data": {
+            "added": len(new_ids),
+            "skipped": len(track_ids) - len(new_ids),
+            "position": position,
+            "total": len(desired),
+        },
+    }
+
+
 def ncm_search_tracks_in_playlists(
     playlist_enc_ids: list[str],
     keywords: list[str],
