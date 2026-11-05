@@ -63,6 +63,17 @@ main.py                 # 入口（~16行），QApplication 启动 + 初始化�
 
 **实测（模拟 ncm-cli 语义）**：4374 首完全倒序 → 43 次请求，顺序逐项校验一致。
 
+### 两条路径的选择（`ncm_reorder_any`）
+
+1. **直连接口**（首选，保留「入库时间」）：`POST https://music.163.com/api/playlist/track/update`
+   —— 老明文接口，ids 放**请求体**所以没有长度上限；需要 `MUSIC_U` + `__csrf` cookie
+   （数字歌单ID + 数字歌曲ID，程序里都有 `originalId`）。
+   Cookie 来源：`~/.config/ncm-cli/session/storage-state.json`（0.1.7 Playwright 登录会生成，明文）
+   或用户在「设置」里手动粘贴（存 config.json 的 `ncm_cookie`，不提交到仓库）。
+2. **分步重排**（回退，无需 cookie）：上面的组合方案，副作用是「入库时间」刷新。
+
+直连不可用（无 cookie / 接口拒绝）时自动回退到分步重排，功能不中断。
+
 ## 已知问题与限制
 
 1. **大歌单 reorder**：歌单超过200首时，ncm-cli `--trackIds` 命令行参数超限（~235 IDs 逗号分隔）。解决方案：大歌单用 `ncm_create_and_fill_playlist` 新建歌单分批添加歌曲，绕过命令行限制。

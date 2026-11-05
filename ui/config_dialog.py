@@ -71,6 +71,24 @@ class ConfigDialog(QDialog):
         self.ai_model_edit.setPlaceholderText("如 gpt-4o-mini / claude-sonnet-4-20250514（留空使用默认）")
         layout.addWidget(self.ai_model_edit)
 
+        layout.addSpacing(14)
+
+        # 高级：网易云 Cookie（直连接口用，可选）
+        adv_lbl = QLabel("高级：网易云 Cookie（可选）")
+        adv_lbl.setProperty("variant", "section")
+        layout.addWidget(adv_lbl)
+        self.cookie_edit = QLineEdit()
+        self.cookie_edit.setPlaceholderText("MUSIC_U=...; __csrf=...")
+        self.cookie_edit.setEchoMode(QLineEdit.EchoMode.Password)
+        layout.addWidget(self.cookie_edit)
+        cookie_hint = QLabel(
+            "用于大歌单（>200 首）原地重排时直连接口，可保留歌曲「入库时间」。\n"
+            "获取方式：浏览器登录 music.163.com → F12 → 网络 → 任意请求 → 复制 Cookie 字符串。\n"
+            "留空则使用分步重排（会刷新入库时间，功能一样可用）。")
+        cookie_hint.setProperty("variant", "weak")
+        cookie_hint.setWordWrap(True)
+        layout.addWidget(cookie_hint)
+
         layout.addSpacing(16)
 
         btn_row = QHBoxLayout()
@@ -104,6 +122,7 @@ class ConfigDialog(QDialog):
                 self.ai_provider_combo.setCurrentIndex(provider_map.get(data.get("ai_provider", "openai"), 0))
                 self.ai_api_key_edit.setText(data.get("ai_api_key", ""))
                 self.ai_model_edit.setText(data.get("ai_model", ""))
+                self.cookie_edit.setText(data.get("ncm_cookie", ""))
             except Exception:
                 pass
 
@@ -121,6 +140,7 @@ class ConfigDialog(QDialog):
             "ai_provider": ai_provider_map.get(self.ai_provider_combo.currentIndex(), "openai"),
             "ai_api_key": self.ai_api_key_edit.text().strip(),
             "ai_model": self.ai_model_edit.text().strip(),
+            "ncm_cookie": self.cookie_edit.text().strip(),
         }
 
         try:

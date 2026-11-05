@@ -6,6 +6,7 @@ import sys
 import tempfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
+from constants import CONFIG_FILE
 from logger import _log
 from utils.match import (
     FIELD_ARTIST, normalize_keywords, track_matches,
@@ -638,6 +639,128 @@ def ncm_add_to_playlist(playlist_enc_id: str, track_ids: list[str], progress_cal
 
     _log(f"[ncm_add_to_playlist] done, {len(track_ids)} tracks -> {playlist_enc_id}")
     return {"code": 200, "data": {"added": len(track_ids)}}
+
+
+def ncm_get_session_cookies() -> dict:
+    """获取可用于直连网易云接口的 cookie（可选增强）
+
+    来源：
+      1) `~/.config/ncm-cli/session/storage-state.json`（ncm-cli 0.1.7 用 Playwright
+         扫码登录后会生成，cookie 是明文）
+      2) 用户在「设置」里手动粘贴的 Cookie（存在 config.json 的 ncm_cookie 字段）
+
+    没有 cookie 时返回空 dict —— 不影响主流程（组合方案不需要 cookie）。
+    """
+    # 1) storage-state.json
+    state_path = os.path.join(os.path.expanduser("~"), ".config", "ncm-cli",
+                              "session", "storage-state.json")
+    try:
+        if os.path.exists(state_path):
+            with open(state_path, "r", encoding="utf-8") as f:
+                state = json.load(f)
+            cookies = {}
+            for c in state.get("cookies") or []:
+                name = c.get("name")
+                if name:
+                    cookies[name] = c.get("value", "")
+            if cookies.get("MUSIC_U"):
+                _log(f"[ncm_get_session_cookies] loaded from storage-state ({len(cookies)} cookies)")
+                return cookies
+    except Exception as e:
+        _log(f"[ncm_get_session_cookies] storage-state read failed: {e}")
+
+    # 2) 设置里手动填的
+    try:
+        if os.path.exists(CONFIG_FILE):
+            with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+                raw = (json.load(f) or {}).get("ncm_cookie", "")
+            cookies = {}
+            for part in str(raw).split(";"):
+                if "=" in part:
+                    k, v = part.split("=", 1)
+                    cookies[k.strip()] = v.strip()
+            if cookies.get("MUSIC_U"):
+                _log("[ncm_get_session_cookies] loaded from config.json")
+                return cookies
+    except Exception as e:
+        _log(f"[ncm_get_session_cookies] config read failed: {e}")
+
+    return {}
+
+
+def ncm_direct_reorder(numeric_playlist_id, numeric_song_ids: list) -> dict:
+    """直连网易云接口重排歌单（ids 放请求体，**没有长度上限**）
+
+    走的是老明文接口 `POST /api/playlist/track/update`（不需要 weapi 加密）：
+      - pid = 歌单数字 ID
+      - ids = 逗号分隔的歌曲数字 ID（顺序即目标顺序）
+      - Cookie: MUSIC_U + __csrf
+
+    成功返回 {"code":200,...}；没有 cookie 或接口拒绝时返回 code != 200，
+    调用方应回退到 `ncm_reorder_in_place` 组合方案。
+    """
+    cookies = ncm_get_session_cookies()
+    music_u = cookies.get("MUSIC_U")
+    csrf = cookies.get("__csrf") or cookies.get("csrf")
+    if not music_u or not csrf:
+        return {"code": -1, "message": "未配置网易云 Cookie，无法直连"}
+
+    ids = ",".join(str(i) for i in numeric_song_ids if i)
+    if not ids:
+        return {"code": -1, "message": "歌曲 ID 为空"}
+
+    try:
+        import requests
+    except ImportError:
+        return {"code": -1, "message": "缺少 requests 依赖"}
+
+    url = "https://music.163.com/api/playlist/track/update"
+    headers = {
+        "Cookie": f"MUSIC_U={music_u}; __csrf={csrf}",
+        "Referer": "https://music.163.com/",
+        "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                       "(KHTML, like Gecko) Chrome/122.0 Safari/537.36"),
+        "Content-Type": "application/x-www-form-urlencoded",
+    }
+    payload = {"ids": ids, "pid": str(numeric_playlist_id), "csrf": csrf}
+    try:
+        resp = requests.post(url, data=payload, headers=headers, timeout=30)
+        try:
+            data = resp.json()
+        except Exception:
+            return {"code": -1, "message": f"接口返回非 JSON（HTTP {resp.status_code}）"}
+        code = data.get("code")
+        _log(f"[ncm_direct_reorder] http={resp.status_code} code={code} "
+             f"ids={len(numeric_song_ids)}")
+        if code == 200:
+            return {"code": 200, "data": data}
+        return {"code": code or -1, "message": data.get("msg") or data.get("message") or "接口拒绝"}
+    except Exception as e:
+        _log(f"[ncm_direct_reorder] request failed: {e}")
+        return {"code": -1, "message": f"请求失败：{e}"}
+
+
+def ncm_reorder_any(
+    playlist_enc_id: str,
+    enc_ids: list[str],
+    numeric_playlist_id=None,
+    numeric_song_ids: list | None = None,
+    progress_callback=None,
+) -> dict:
+    """大歌单重排：优先直连 API（保留入库时间），失败自动回退组合方案"""
+    if numeric_playlist_id and numeric_song_ids:
+        direct = ncm_direct_reorder(numeric_playlist_id, numeric_song_ids)
+        if direct and direct.get("code") == 200:
+            _log("[ncm_reorder_any] direct API succeeded")
+            return {"code": 200, "data": {"ordered": True, "missing": [], "total": len(enc_ids),
+                                          "method": "direct", "message": ""}}
+        _log(f"[ncm_reorder_any] direct API unavailable ({direct.get('message')}), fallback to hybrid")
+
+    result = ncm_reorder_in_place(playlist_enc_id, enc_ids, progress_callback=progress_callback)
+    if result and result.get("code") == 200:
+        data = result.setdefault("data", {})
+        data["method"] = "hybrid"
+    return result
 
 
 def ncm_reorder_in_place(

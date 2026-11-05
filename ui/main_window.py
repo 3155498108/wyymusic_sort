@@ -16,7 +16,7 @@ from constants import CONFIG_FILE
 from core.ncm_client import (
     ncm_login_check, ncm_logout, ncm_login,
     ncm_get_tracks, ncm_reorder, ncm_create_and_fill_playlist,
-    ncm_fill_publish_time, ncm_reorder_in_place,
+    ncm_fill_publish_time, ncm_reorder_any,
 )
 from ui.login_dialog import LoginDialog
 from ui.config_dialog import ConfigDialog
@@ -717,8 +717,9 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "错误", "未选择歌单")
             return
 
-        # 从 sorted_tracks 提取加密ID（encId 字段）
+        # 从 sorted_tracks 提取加密ID（encId 字段）与数字ID（直连 API 用）
         enc_ids = [tr.get("encId") for tr in self._sorted_tracks if tr.get("encId")]
+        num_ids = [tr.get("id") for tr in self._sorted_tracks if tr.get("id")]
         _log(f"[apply_to_server] first track keys={list(self._sorted_tracks[0].keys()) if self._sorted_tracks else []}")
         _log(f"[apply_to_server] enc_ids count={len(enc_ids)}, first={enc_ids[0] if enc_ids else None}")
         if not enc_ids:
@@ -760,7 +761,8 @@ class MainWindow(QMainWindow):
             else:
                 self.status_lbl.setText("正在应用排序到服务器...")
             self.apply_btn.setEnabled(False)
-            threading.Thread(target=self._bg_reorder, args=(enc_ids,), daemon=True).start()
+            threading.Thread(target=self._bg_reorder, args=(enc_ids, num_ids),
+                             daemon=True).start()
 
         btn_new = QPushButton(f"新建歌单「{playlist_name}-排序版」\n（稳定可靠，原歌单不变）")
         btn_new.setMinimumHeight(62)
@@ -771,7 +773,8 @@ class MainWindow(QMainWindow):
         if is_large:
             btn_reorder = QPushButton(
                 "原地重排（保留原歌单）\n"
-                "⚠️ 歌曲「入库时间」会刷新为现在；个别受限歌曲可能加不回去")
+                "优先直连接口（保留入库时间），不可用时自动改用分步重排\n"
+                "⚠️ 分步重排会让歌曲「入库时间」刷新为现在")
         else:
             btn_reorder = QPushButton("直接修改原歌单\n（快速）")
         btn_reorder.setMinimumHeight(62)
@@ -792,10 +795,10 @@ class MainWindow(QMainWindow):
         _log("[_bg_create_and_fill] done, posting UI update")
         post(self._do_update_ui_new_playlist, result, enc_ids, new_name)
 
-    def _bg_reorder(self, enc_ids):
+    def _bg_reorder(self, enc_ids, num_ids=None):
         _log("[_bg_reorder] started")
         if len(enc_ids) > 200:
-            # 大歌单：单次 reorder 放不下，用「reorder 尾段 + add 前段」组合方案
+            # 大歌单：单次 reorder 放不下 —— 优先直连接口，失败自动回退分步重排
             def _progress(cur, total, msg):
                 def _do():
                     self.album_progress.setVisible(True)
@@ -804,7 +807,12 @@ class MainWindow(QMainWindow):
                     self.status_lbl.setText(msg)
                 post(_do)
 
-            result = ncm_reorder_in_place(self.current_pl_enc_id, enc_ids, progress_callback=_progress)
+            result = ncm_reorder_any(
+                self.current_pl_enc_id, enc_ids,
+                numeric_playlist_id=getattr(self, "current_pl_raw_id", None),
+                numeric_song_ids=num_ids or [],
+                progress_callback=_progress,
+            )
         else:
             result = ncm_reorder(self.current_pl_enc_id, enc_ids)
         _log("[_bg_reorder] done, posting UI update")
